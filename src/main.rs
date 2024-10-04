@@ -1,7 +1,7 @@
 extern crate clap;
-extern crate oq3_lexer;
-extern crate oq3_parser;
-extern crate oq3_source_file;
+// extern crate oq3_lexer;
+// extern crate oq3_parser;
+// extern crate oq3_source_file;
 extern crate qasm;
 
 use clap::Parser;
@@ -10,8 +10,8 @@ use std::env;
 use std::fmt::Write;
 use std::io::IsTerminal;
 
-mod pbc;
 mod lapbc;
+mod pbc;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -21,9 +21,9 @@ struct Args {
     filename: String,
 }
 
-use pbc::Pauli;
-use pbc::Axis;
 use pbc::Angle;
+use pbc::Axis;
+use pbc::Pauli;
 use pbc::PauliRotation;
 
 struct Registers {
@@ -476,16 +476,19 @@ fn extract(nodes: &[qasm::AstNode]) -> Option<(Vec<PauliRotation>, Registers)> {
     );
 
     let result = pbc::spc_translation(&ops);
-    let cliffords = ops.iter().filter_map(|op| match op {
-        pbc::Operator::PauliRotation(r) => {
-            if r.is_clifford() {
-                Some(r.clone())
-            } else {
-                None
+    let cliffords = ops
+        .iter()
+        .filter_map(|op| match op {
+            pbc::Operator::PauliRotation(r) => {
+                if r.is_clifford() {
+                    Some(r.clone())
+                } else {
+                    None
+                }
             }
-        }
-        _ => None,
-    }).collect::<Vec<_>>();
+            _ => None,
+        })
+        .collect::<Vec<_>>();
 
     let num_qubits = match &result[0] {
         pbc::Operator::PauliRotation(r) => r.axis.len(),
@@ -536,7 +539,6 @@ fn extract(nodes: &[qasm::AstNode]) -> Option<(Vec<PauliRotation>, Registers)> {
     let mut lapbc_compact_num_spc_ops = 0_u32;
     let mut lapbc_compact_axis_permutations = 0_u32;
 
-
     let lapbc_result = lapbc::lapbc_compact_translation(&ops);
     for (i, op) in lapbc_result.iter().enumerate() {
         lapbc_compact_clocks += op.clocks();
@@ -546,15 +548,18 @@ fn extract(nodes: &[qasm::AstNode]) -> Option<(Vec<PauliRotation>, Registers)> {
             }
             LapbcCompactOperator::AxisPermutation(_) => {
                 lapbc_compact_axis_permutations += 1;
-            },
-            LapbcCompactOperator::Noop => ()
+            }
+            LapbcCompactOperator::Noop => (),
         }
         let mut out = String::new();
         write!(&mut out, "{:>4} {:}", i, op).unwrap();
         print_line_potentially_with_colors(&out);
     }
     println!("lapbc compact clocks: {}", lapbc_compact_clocks);
-    println!("SPC ops: {}, axis permutations: {}", lapbc_compact_num_spc_ops, lapbc_compact_axis_permutations);
+    println!(
+        "SPC ops: {}, axis permutations: {}",
+        lapbc_compact_num_spc_ops, lapbc_compact_axis_permutations
+    );
 
     None
 }
