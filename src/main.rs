@@ -11,7 +11,9 @@ use std::fmt::Write;
 use std::io::IsTerminal;
 
 mod lapbc;
+mod mapping;
 mod pbc;
+
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]

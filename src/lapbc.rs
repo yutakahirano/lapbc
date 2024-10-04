@@ -173,25 +173,13 @@ fn lapbc_compact_axis_permutation(commuting_ops: &[&Operator]) -> AxisPermutatio
         }
         for i in 1..(n / 2) {
             if axis[2 * i] == Y {
-                perm.push(PauliRotation::new_clifford(Axis::new_with_pauli(
-                    2 * i,
-                    n,
-                    Z,
-                )));
+                perm.push(PauliRotation::new_clifford(Axis::new_with_pauli(2 * i, n, Z)));
             } else if axis[2 * i + 1] == Y {
-                perm.push(PauliRotation::new_clifford(Axis::new_with_pauli(
-                    2 * i + 1,
-                    n,
-                    Z,
-                )));
+                perm.push(PauliRotation::new_clifford(Axis::new_with_pauli(2 * i + 1, n, Z)));
             }
         }
         if n % 2 == 1 && axis[n - 1] == Y {
-            perm.push(PauliRotation::new_clifford(Axis::new_with_pauli(
-                n - 1,
-                n,
-                Z,
-            )));
+            perm.push(PauliRotation::new_clifford(Axis::new_with_pauli(n - 1, n, Z)));
         }
     } else {
         use Pauli::*;
@@ -208,43 +196,19 @@ fn lapbc_compact_axis_permutation(commuting_ops: &[&Operator]) -> AxisPermutatio
         }
         for i in 1..(n / 2) {
             if axis[2 * i] == X {
-                perm.push(PauliRotation::new_clifford(Axis::new_with_pauli(
-                    2 * i,
-                    n,
-                    Y,
-                )));
+                perm.push(PauliRotation::new_clifford(Axis::new_with_pauli(2 * i, n, Y)));
             } else if axis[2 * i + 1] == X {
-                perm.push(PauliRotation::new_clifford(Axis::new_with_pauli(
-                    2 * i + 1,
-                    n,
-                    Y,
-                )));
+                perm.push(PauliRotation::new_clifford(Axis::new_with_pauli(2 * i + 1, n, Y)));
             } else if axis[2 * i] == Y {
-                perm.push(PauliRotation::new_clifford(Axis::new_with_pauli(
-                    2 * i,
-                    n,
-                    Z,
-                )));
+                perm.push(PauliRotation::new_clifford(Axis::new_with_pauli(2 * i, n, Z)));
             } else if axis[2 * i + 1] == Y {
-                perm.push(PauliRotation::new_clifford(Axis::new_with_pauli(
-                    2 * i + 1,
-                    n,
-                    Z,
-                )));
+                perm.push(PauliRotation::new_clifford(Axis::new_with_pauli(2 * i + 1, n, Z)));
             }
         }
         if n % 2 == 1 && axis[n - 1] == X {
-            perm.push(PauliRotation::new_clifford(Axis::new_with_pauli(
-                n - 1,
-                n,
-                Y,
-            )));
+            perm.push(PauliRotation::new_clifford(Axis::new_with_pauli(n - 1, n, Y)));
         } else if n % 2 == 1 && axis[n - 1] == Y {
-            perm.push(PauliRotation::new_clifford(Axis::new_with_pauli(
-                n - 1,
-                n,
-                Z,
-            )));
+            perm.push(PauliRotation::new_clifford(Axis::new_with_pauli(n - 1, n, Z)));
         }
     }
 
@@ -836,18 +800,14 @@ mod tests {
             O(R(PauliRotation::new_pi_over_8(new_axis("ZIII")))),
             O(R(PauliRotation::new_pi_over_8(new_axis("IZII")))),
             O(R(PauliRotation::new_pi_over_8(new_axis("IIZI")))),
-            A(AxisPermutation::new(vec![PauliRotation::new_clifford(
-                new_axis("IIIZ"),
-            )])),
+            A(AxisPermutation::new(vec![PauliRotation::new_clifford(new_axis("IIIZ"))])),
             A(AxisPermutation::new(vec![
                 PauliRotation::new_clifford(new_axis("YIII")),
                 PauliRotation::new_clifford(new_axis("IIIY")),
             ])),
             O(R(PauliRotation::new_pi_over_8(new_axis("ZIII")))),
             O(M(new_axis("IIIZ"))),
-            A(AxisPermutation::new(vec![PauliRotation::new_clifford(
-                new_axis("YIII"),
-            )])),
+            A(AxisPermutation::new(vec![PauliRotation::new_clifford(new_axis("YIII"))])),
             O(R(PauliRotation::new_pi_over_8(new_axis("ZIII")))),
         ];
         assert_eq!(result, expected);
@@ -892,12 +852,8 @@ mod tests {
             O(R(PauliRotation::new_pi_over_8(new_axis("IIIZII")))),
             O(R(PauliRotation::new_pi_over_8(new_axis("ZIIIIZ")))),
             O(M(new_axis("IIIIIZ"))),
-            A(AxisPermutation::new(vec![PauliRotation::new_clifford(
-                new_axis("IIZIII"),
-            )])),
-            A(AxisPermutation::new(vec![PauliRotation::new_clifford(
-                new_axis("IIYIII"),
-            )])),
+            A(AxisPermutation::new(vec![PauliRotation::new_clifford(new_axis("IIZIII"))])),
+            A(AxisPermutation::new(vec![PauliRotation::new_clifford(new_axis("IIYIII"))])),
             O(R(PauliRotation::new_pi_over_8(new_axis("IIZIII")))),
         ];
         assert_eq!(result[6], expected[6]);
