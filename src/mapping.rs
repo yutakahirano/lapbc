@@ -4,7 +4,7 @@ pub struct Qubit {
 }
 
 #[derive(Debug)]
-pub struct Mapping {
+pub struct DataQubitMapping {
     pub width: u32,
     pub height: u32,
 
@@ -17,16 +17,16 @@ impl Qubit {
     }
 }
 
-impl Mapping {
-    pub fn new(width: u32, height: u32) -> Mapping {
-        Mapping {
+impl DataQubitMapping {
+    pub fn new(width: u32, height: u32) -> DataQubitMapping {
+        DataQubitMapping {
             width,
             height,
             mapping: Vec::new(),
         }
     }
 
-    pub fn new_from_json(json: &str) -> Result<Mapping, String> {
+    pub fn new_from_json(json: &str) -> Result<DataQubitMapping, String> {
         let json: serde_json::Value = match serde_json::from_str(json) {
             Ok(json) => json,
             Err(e) => {
@@ -57,7 +57,7 @@ impl Mapping {
             return Err(format!("height should be an integer, but got {}", height));
         };
 
-        let mut result = Mapping::new(width, height);
+        let mut result = DataQubitMapping::new(width, height);
 
         let mapping_list = if let Some(value) = json.get("mapping") {
             if let Some(mapping_list) = value.as_array() {
@@ -151,7 +151,7 @@ mod tests {
 
     #[test]
     fn test_mapping_init() {
-        let mapping = Mapping::new(2, 3);
+        let mapping = DataQubitMapping::new(2, 3);
         assert_eq!(mapping.width, 2);
         assert_eq!(mapping.height, 3);
         assert_eq!(mapping.mapping.len(), 0);
@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn test_mapping_add() {
-        let mut mapping = Mapping::new(2, 3);
+        let mut mapping = DataQubitMapping::new(2, 3);
 
         mapping.map(Qubit::new(3), 1, 2);
 
@@ -192,7 +192,7 @@ mod tests {
     #[test]
     fn test_mapping_new_from_json_invalid_syntax() {
         let json = r#"{"width": 3, "height": 4, mapping: [], hogefuga}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         let expectation = "failed to parse json: key must be a string at line 1 column 27";
         assert!(matches!(result, Err(s) if s == *expectation));
     }
@@ -200,63 +200,63 @@ mod tests {
     #[test]
     fn test_mapping_new_from_json_width_is_missing() {
         let json = r#"{"height": 3, "mapping": []}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         assert!(matches!(result, Err(s) if s == *"width is not found"));
     }
 
     #[test]
     fn test_mapping_new_from_json_height_is_missing() {
         let json = r#"{"width": 3, "mapping": []}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         assert!(matches!(result, Err(s) if s == *"height is not found"));
     }
 
     #[test]
     fn test_mapping_new_from_json_width_is_not_a_number() {
         let json = r#"{"width": "3", "height": 3, "mapping": []}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         assert!(matches!(result, Err(s) if s == *"width should be an integer, but got \"3\""));
     }
 
     #[test]
     fn test_mapping_new_from_json_width_is_negative() {
         let json = r#"{"width": -1, "height": 3, "mapping": []}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         assert!(matches!(result, Err(s) if s == *"width should be positive, but got -1"));
     }
 
     #[test]
     fn test_mapping_new_from_json_width_is_zero() {
         let json = r#"{"width": 0, "height": 3, "mapping": []}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         assert!(matches!(result, Err(s) if s == *"width should be positive, but got 0"));
     }
 
     #[test]
     fn test_mapping_new_from_json_height_is_not_a_number() {
         let json = r#"{"width": 1, "height": "4", "mapping": []}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         assert!(matches!(result, Err(s) if s == *"height should be an integer, but got \"4\""));
     }
 
     #[test]
     fn test_mapping_new_from_json_height_is_negative() {
         let json = r#"{"width": 1, "height": -2, "mapping": []}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         assert!(matches!(result, Err(s) if s == *"height should be positive, but got -2"));
     }
 
     #[test]
     fn test_mapping_new_from_json_height_is_zero() {
         let json = r#"{"width": 1, "height": 0, "mapping": []}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         assert!(matches!(result, Err(s) if s == *"height should be positive, but got 0"));
     }
 
     #[test]
     fn test_mapping_new_from_json_mapping_is_missing() {
         let json = r#"{"width": 3, "height": 4}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         assert!(result.is_ok());
         let mapping = result.unwrap();
 
@@ -268,14 +268,14 @@ mod tests {
     #[test]
     fn test_mapping_new_from_json_mapping_is_not_an_array() {
         let json = r#"{"width": 3, "height": 4, "mapping": {}}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         assert!(matches!(result, Err(s) if s == *"mapping should be a list, but got {}"));
     }
 
     #[test]
     fn test_mapping_new_from_json_empty_mapping() {
         let json = r#"{"width": 3, "height": 4, "mapping": []}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         assert!(result.is_ok());
         let mapping = result.unwrap();
 
@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn test_mapping_new_from_json_mapping_entry_is_not_object() {
         let json = r#"{"width": 3, "height": 4, "mapping": [4.2]}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         assert!(
             matches!(result, Err(s) if s == *"each mapping entry should be an object, but got 4.2")
         );
@@ -299,7 +299,7 @@ mod tests {
             {"x": 1, "y": 2, "qubit": 3},
             {"y": 5, "qubit": 4}
         ]}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         assert!(
             matches!(result, Err(s) if s == *r#"x is not found in mapping entry {"qubit":4,"y":5}"#)
         );
@@ -310,7 +310,7 @@ mod tests {
         let json = r#"{"width": 3, "height": 4, "mapping": [
             {"x": {}, "y": 5, "qubit": 4}
         ]}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         println!("{:?}", result);
         assert!(matches!(result, Err(s) if s == *r#"x should be an integer, but got {}"#));
     }
@@ -320,7 +320,7 @@ mod tests {
         let json = r#"{"width": 3, "height": 4, "mapping": [
             {"x": -1, "y": 5, "qubit": 4}
         ]}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         println!("{:?}", result);
         assert!(matches!(result, Err(s) if s == *r#"x(-1) is out of bounds"#));
     }
@@ -330,7 +330,7 @@ mod tests {
         let json = r#"{"width": 3, "height": 4, "mapping": [
             {"x": 3, "y": 5, "qubit": 4}
         ]}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         println!("{:?}", result);
         assert!(matches!(result, Err(s) if s == *r#"x(3) is out of bounds"#));
     }
@@ -341,7 +341,7 @@ mod tests {
             {"x": 1, "y": 2, "qubit": 3},
             {"x": 0, "qubit": 2}
         ]}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         assert!(
             matches!(result, Err(s) if s == *r#"y is not found in mapping entry {"qubit":2,"x":0}"#)
         );
@@ -352,7 +352,7 @@ mod tests {
         let json = r#"{"width": 3, "height": 4, "mapping": [
             {"x": 1, "y": 5.2, "qubit": 0}
         ]}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         println!("{:?}", result);
         assert!(matches!(result, Err(s) if s == *r#"y should be an integer, but got 5.2"#));
     }
@@ -362,7 +362,7 @@ mod tests {
         let json = r#"{"width": 3, "height": 4, "mapping": [
             {"x": 0, "y": -3, "qubit": 4}
         ]}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         println!("{:?}", result);
         assert!(matches!(result, Err(s) if s == *r#"y(-3) is out of bounds"#));
     }
@@ -372,7 +372,7 @@ mod tests {
         let json = r#"{"width": 3, "height": 4, "mapping": [
             {"x": 0, "y": 5, "qubit": 4}
         ]}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         assert!(matches!(result, Err(s) if s == *r#"y(5) is out of bounds"#));
     }
 
@@ -382,7 +382,7 @@ mod tests {
             {"x": 0, "y": 1, "qubit": 4},
             {"x": 2, "y": 3, "qubit": 4}
         ]}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         assert!(matches!(result, Err(s) if s == *r#"qubit 4 is already assigned"#));
     }
 
@@ -392,7 +392,7 @@ mod tests {
             {"x": 0, "y": 1, "qubit": 1},
             {"x": 0, "y": 1, "qubit": 4}
         ]}"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         assert!(matches!(result, Err(s) if s == *r#"(0, 1) is already occupied"#));
     }
     #[test]
@@ -406,7 +406,7 @@ mod tests {
                 {"x": 0, "y": 2, "qubit": 3}
             ]
         }"#;
-        let result = Mapping::new_from_json(json);
+        let result = DataQubitMapping::new_from_json(json);
         assert!(result.is_ok());
         let mapping = result.unwrap();
         assert_eq!(mapping.width, 2);
@@ -419,5 +419,10 @@ mod tests {
                 (0, 2, Qubit::new(3))
             ]
         );
+        assert!(mapping.get(Qubit::new(0)).is_none());
+        assert_eq!(mapping.get(Qubit::new(1)), Some((1, 2)));
+        assert_eq!(mapping.get(Qubit::new(2)), Some((1, 0)));
+        assert_eq!(mapping.get(Qubit::new(3)), Some((0, 2)));
+        assert!(mapping.get(Qubit::new(4)).is_none());
     }
 }
