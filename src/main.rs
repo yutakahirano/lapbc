@@ -14,7 +14,6 @@ mod lapbc;
 mod mapping;
 mod pbc;
 
-
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -103,18 +102,12 @@ fn extract_qubit(
 ) -> Result<u32, String> {
     if let qasm::Argument::Qubit(qubit, index) = &args[args_index as usize] {
         if *index < 0 {
-            return Err(format!(
-                "{}: args[{}] must be non-negative",
-                context, args_index
-            ));
+            return Err(format!("{}: args[{}] must be non-negative", context, args_index));
         }
         if let Some(index) = registers.qubit_index(qubit, *index as u32) {
             Ok(index)
         } else {
-            Err(format!(
-                "{}: there is no qubit {}[{}]",
-                context, qubit, index
-            ))
+            Err(format!("{}: there is no qubit {}[{}]", context, qubit, index))
         }
     } else {
         Err(format!("{}: args[{}] must be a qubit", context, args_index))
@@ -129,24 +122,15 @@ fn extract_classical_bit(
 ) -> Result<u32, String> {
     if let qasm::Argument::Qubit(qubit, index) = &args[args_index as usize] {
         if *index < 0 {
-            return Err(format!(
-                "{}: args[{}] must be non-negative",
-                context, args_index
-            ));
+            return Err(format!("{}: args[{}] must be non-negative", context, args_index));
         }
         if let Some(index) = registers.classical_bit_index(qubit, *index as u32) {
             Ok(index)
         } else {
-            Err(format!(
-                "{}: there is no classical bit {}[{}]",
-                context, qubit, index
-            ))
+            Err(format!("{}: there is no classical bit {}[{}]", context, qubit, index))
         }
     } else {
-        Err(format!(
-            "{}: args[{}] must be a classical bit",
-            context, args_index
-        ))
+        Err(format!("{}: args[{}] must be a classical bit", context, args_index))
     }
 }
 
@@ -217,10 +201,7 @@ fn translate_gate(
         }
         "rz" => {
             if args.len() != 1 {
-                return Err(format!(
-                    "Invalid number of arguments for rz: {}",
-                    args.len()
-                ));
+                return Err(format!("Invalid number of arguments for rz: {}", args.len()));
             }
             if angle_args.len() != 1 {
                 return Err(format!(
@@ -237,10 +218,7 @@ fn translate_gate(
         }
         "ry" => {
             if args.len() != 1 {
-                return Err(format!(
-                    "Invalid number of arguments for ry: {}",
-                    args.len()
-                ));
+                return Err(format!("Invalid number of arguments for ry: {}", args.len()));
             }
             if angle_args.len() != 1 {
                 return Err(format!(
@@ -257,10 +235,7 @@ fn translate_gate(
         }
         "sx" => {
             if args.len() != 1 {
-                return Err(format!(
-                    "Invalid number of arguments for sx: {}",
-                    args.len()
-                ));
+                return Err(format!("Invalid number of arguments for sx: {}", args.len()));
             }
             if !angle_args.is_empty() {
                 return Err(format!(
@@ -293,10 +268,7 @@ fn translate_gate(
         }
         "cx" => {
             if args.len() != 2 {
-                return Err(format!(
-                    "Invalid number of arguments for cx: {}",
-                    args.len()
-                ));
+                return Err(format!("Invalid number of arguments for cx: {}", args.len()));
             }
             if !angle_args.is_empty() {
                 return Err(format!(
@@ -324,10 +296,7 @@ fn translate_gate(
         }
         "measure" => {
             if args.len() != 2 {
-                return Err(format!(
-                    "Invalid number of arguments for measure: {}",
-                    args.len()
-                ));
+                return Err(format!("Invalid number of arguments for measure: {}", args.len()));
             }
             if !angle_args.is_empty() {
                 return Err(format!(
@@ -617,10 +586,7 @@ mod tests {
     #[test]
     fn test_extract_angle() {
         assert_eq!(extract_angle("0", "test"), Ok(Angle::Zero));
-        assert_eq!(
-            extract_angle("", "test"),
-            Err("test: angle must not be empty".to_string())
-        );
+        assert_eq!(extract_angle("", "test"), Err("test: angle must not be empty".to_string()));
         assert_eq!(extract_angle(" pi ", "test"), Ok(Angle::PiOver2));
         // We expect a space before "pi".
         assert_eq!(
@@ -714,20 +680,14 @@ mod tests {
         {
             let angle_args = vec![];
             let r = translate_gate("ry", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(
-                r,
-                Err("Invalid number of angle arguments for ry: 0".to_string())
-            );
+            assert_eq!(r, Err("Invalid number of angle arguments for ry: 0".to_string()));
             assert_eq!(ops.len(), 2);
         }
 
         {
             let angle_args = vec!["0".to_string(), "0".to_string()];
             let r = translate_gate("ry", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(
-                r,
-                Err("Invalid number of angle arguments for ry: 2".to_string())
-            );
+            assert_eq!(r, Err("Invalid number of angle arguments for ry: 2".to_string()));
             assert_eq!(ops.len(), 2);
         }
         {
@@ -793,20 +753,14 @@ mod tests {
         {
             let angle_args = vec![];
             let r = translate_gate("rz", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(
-                r,
-                Err("Invalid number of angle arguments for rz: 0".to_string())
-            );
+            assert_eq!(r, Err("Invalid number of angle arguments for rz: 0".to_string()));
             assert_eq!(ops.len(), 2);
         }
 
         {
             let angle_args = vec!["0".to_string(), "0".to_string()];
             let r = translate_gate("rz", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(
-                r,
-                Err("Invalid number of angle arguments for rz: 2".to_string())
-            );
+            assert_eq!(r, Err("Invalid number of angle arguments for rz: 2".to_string()));
             assert_eq!(ops.len(), 2);
         }
         {
@@ -849,10 +803,7 @@ mod tests {
         {
             let angle_args = vec!["0".to_string()];
             let r = translate_gate("sx", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(
-                r,
-                Err("Invalid number of angle arguments for sx: 1".to_string())
-            );
+            assert_eq!(r, Err("Invalid number of angle arguments for sx: 1".to_string()));
             assert_eq!(ops.len(), 1);
         }
         {
@@ -883,20 +834,14 @@ mod tests {
         {
             let angle_args = vec!["0".to_string()];
             let r = translate_gate("measure", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(
-                r,
-                Err("Invalid number of angle arguments for measure: 1".to_string())
-            );
+            assert_eq!(r, Err("Invalid number of angle arguments for measure: 1".to_string()));
             assert_eq!(ops.len(), 1);
         }
 
         {
             let args = vec![Argument::Qubit("q".to_string(), 0)];
             let r = translate_gate("measure", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(
-                r,
-                Err("Invalid number of arguments for measure: 1".to_string())
-            );
+            assert_eq!(r, Err("Invalid number of arguments for measure: 1".to_string()));
             assert_eq!(ops.len(), 1);
         }
 
@@ -907,10 +852,7 @@ mod tests {
                 Argument::Qubit("q".to_string(), 2),
             ];
             let r = translate_gate("measure", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(
-                r,
-                Err("Invalid number of arguments for measure: 3".to_string())
-            );
+            assert_eq!(r, Err("Invalid number of arguments for measure: 3".to_string()));
             assert_eq!(ops.len(), 1);
         }
 
@@ -920,10 +862,7 @@ mod tests {
                 Argument::Qubit("q".to_string(), 1),
             ];
             let r = translate_gate("measure", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(
-                r,
-                Err("measure: there is no classical bit q[1]".to_string())
-            );
+            assert_eq!(r, Err("measure: there is no classical bit q[1]".to_string()));
             assert_eq!(ops.len(), 1);
         }
 
@@ -953,10 +892,7 @@ mod tests {
                 Argument::Qubit("c".to_string(), 4),
             ];
             let r = translate_gate("measure", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(
-                r,
-                Err("measure: there is no classical bit c[4]".to_string())
-            );
+            assert_eq!(r, Err("measure: there is no classical bit c[4]".to_string()));
             assert_eq!(ops.len(), 1);
         }
     }
@@ -1003,10 +939,7 @@ mod tests {
         {
             let angle_args = vec!["0".to_string()];
             let r = translate_gate("cx", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(
-                r,
-                Err("Invalid number of angle arguments for cx: 1".to_string())
-            );
+            assert_eq!(r, Err("Invalid number of angle arguments for cx: 1".to_string()));
             assert_eq!(ops.len(), 3);
         }
         {
@@ -1035,10 +968,7 @@ mod tests {
                 Argument::Qubit("q".to_string(), 1),
             ];
             let r = translate_gate("cx", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(
-                r,
-                Err("cx: control and target must be different".to_string())
-            );
+            assert_eq!(r, Err("cx: control and target must be different".to_string()));
             assert_eq!(ops.len(), 3);
         }
     }

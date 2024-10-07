@@ -670,10 +670,7 @@ mod tests {
         ];
 
         let result = spc_translation(&ops);
-        assert_eq!(
-            result,
-            vec![R(PauliRotation::new_pi_over_8(new_axis("IIZYI")))]
-        );
+        assert_eq!(result, vec![R(PauliRotation::new_pi_over_8(new_axis("IIZYI")))]);
     }
     #[test]
     fn test_spc_compact_translation_one_trivial() {
@@ -700,10 +697,7 @@ mod tests {
         {
             let (clifford_ops, additional_clocks) =
                 spc_compact_translation_one(&R(PauliRotation::new_pi_over_8(new_axis("IXIIII"))));
-            assert_eq!(
-                clifford_ops,
-                vec![PauliRotation::new_clifford(new_axis("IYIIII"))]
-            );
+            assert_eq!(clifford_ops, vec![PauliRotation::new_clifford(new_axis("IYIIII"))]);
             assert_eq!(additional_clocks, 3);
         }
 
