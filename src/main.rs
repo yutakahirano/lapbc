@@ -10,6 +10,7 @@ use std::env;
 use std::fmt::Write;
 use std::io::IsTerminal;
 
+mod board;
 mod lapbc;
 mod mapping;
 mod pbc;

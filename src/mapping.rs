@@ -1,4 +1,4 @@
-#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+#[derive(Clone, Copy, Eq, PartialEq, Debug, Hash)]
 pub struct Qubit {
     pub qubit: usize,
 }
@@ -143,6 +143,11 @@ impl DataQubitMapping {
 
         self.mapping.push((x, y, qubit));
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = &(u32, u32, Qubit)> {
+        self.mapping.iter()
+    }
+
 }
 
 #[cfg(test)]
