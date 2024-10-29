@@ -22,15 +22,25 @@ enum BoardOccupancy {
 }
 
 pub struct Board {
-    width: u32,
-    height: u32,
-    code_distance: u32,
+    conf: Configuration,
 
     data_qubit_mapping: HashMap<Qubit, (u32, u32)>,
     occupancy: Vec<BoardOccupancy>,
     cycle_after_last_operation_at: Vec<u32>,
     cycle: u32,
     current_operation_id: OperationId,
+}
+
+#[derive(Debug, Clone)]
+pub struct Configuration {
+    width: u32,
+    height: u32,
+    // The code distance.
+    code_distance: u32,
+    // The cycle needed to distill a magic state.
+    magic_state_distillation_cost: u32,
+    // The probability to distill a magic state successfully.
+    magic_state_distillation_success_rate: f64,
 }
 
 struct Map2D<T: Clone + Default> {
@@ -58,28 +68,29 @@ fn y_measurement_cost(distance: u32) -> u32 {
 }
 
 impl Board {
-    pub fn new(mapping: DataQubitMapping, code_distance: u32) -> Self {
+    pub fn new(mapping: DataQubitMapping, conf: &Configuration) -> Self {
+        assert_eq!(mapping.width, conf.width);
+        assert_eq!(mapping.height, conf.height);
+
         let occupancy = vec![];
-        let last_operation_cycle = vec![];
         let current_operation_id = OperationId { id: 0 };
 
         Self {
-            width: mapping.width,
-            height: mapping.height,
-            code_distance,
+            conf: conf.clone(),
             data_qubit_mapping: mapping.iter().map(|(x, y, q)| (*q, (*x, *y))).collect(),
             occupancy,
-            cycle_after_last_operation_at: last_operation_cycle,
+            cycle_after_last_operation_at: vec![],
             cycle: 0,
             current_operation_id,
         }
     }
+
     pub fn width(&self) -> u32 {
-        self.width
+        self.conf.width
     }
 
     pub fn height(&self) -> u32 {
-        self.height
+        self.conf.height
     }
 
     fn issue_operation_id(&mut self) -> OperationId {
@@ -119,7 +130,7 @@ impl Board {
 
         let duration = match axis {
             Pauli::X => 1,
-            Pauli::Y => (self.code_distance + 1) / 2,
+            Pauli::Y => (self.conf.code_distance + 1) / 2,
             Pauli::Z => 1,
             Pauli::I => return true,
         };
@@ -183,7 +194,7 @@ impl Board {
 
         let (x, y) = self.data_qubit_mapping[&qubit];
         let cycle = self.cycle;
-        let distance = self.code_distance;
+        let distance = self.conf.code_distance;
 
         self.ensure_board_occupancy(cycle + distance + y_initialization_cost(distance));
         match axis {
@@ -193,7 +204,7 @@ impl Board {
                 if x > 0 {
                     candidates.push((x - 1, y));
                 }
-                if x < self.width - 1 {
+                if x < self.conf.width - 1 {
                     candidates.push((x + 1, y));
                 }
                 self.schedule_pi_over_4_rotation_internal(&[(qubit, x, y)], &[(x, y)], &candidates)
@@ -203,7 +214,7 @@ impl Board {
                 if y > 0 {
                     candidates.push((x, y - 1));
                 }
-                if y < self.height - 1 {
+                if y < self.conf.height - 1 {
                     candidates.push((x, y + 1));
                 }
                 self.schedule_pi_over_4_rotation_internal(&[(qubit, x, y)], &[(x, y)], &candidates)
@@ -220,7 +231,7 @@ impl Board {
         axis2: Pauli,
     ) -> bool {
         let cycle = self.cycle;
-        let distance = self.code_distance;
+        let distance = self.conf.code_distance;
         let y_initialization_cost = y_initialization_cost(distance);
         if self.has_schedule_at_or_after(q1, cycle) || self.has_schedule_at_or_after(q2, cycle) {
             return false;
@@ -246,13 +257,13 @@ impl Board {
             if x > 0 {
                 candidates.push((x - 1, y));
             }
-            if x + 1 < self.width {
+            if x + 1 < self.conf.width {
                 candidates.push((x + 1, y));
             }
             if y > 0 {
                 candidates.push((x, y - 1));
             }
-            if y + 1 < self.height {
+            if y + 1 < self.conf.height {
                 candidates.push((x, y + 1));
             }
             adjacent_ancilla_candidates.extend(
@@ -276,7 +287,7 @@ impl Board {
         ancilla_candidates: &[(u32, u32)],
     ) -> bool {
         let cycle = self.cycle;
-        let distance = self.code_distance;
+        let distance = self.conf.code_distance;
         let y_initialization_cost = y_initialization_cost(distance);
         let id = self.issue_operation_id();
 
@@ -508,7 +519,7 @@ impl Board {
     }
 
     fn ensure_board_occupancy(&mut self, cycle: u32) {
-        let size = (self.width * self.height) as usize;
+        let size = (self.conf.width * self.conf.height) as usize;
         assert_eq!(self.occupancy.len() % size, 0);
         let current_max_cycle = (self.occupancy.len() / size) as u32;
 
@@ -523,19 +534,22 @@ impl Board {
             for (_q, (x, y)) in &self.data_qubit_mapping {
                 let o = BoardOccupancy::IdleDataQubit;
                 // We don't use set_occupancy here in order to avoid Rust borrow checker complaints.
-                self.occupancy[(c * self.width * self.height + y * self.width + x) as usize] = o;
+                self.occupancy
+                    [(c * self.conf.width * self.conf.height + y * self.conf.width + x) as usize] =
+                    o;
             }
         }
     }
 
     fn get_occupancy(&self, x: u32, y: u32, cycle: u32) -> BoardOccupancy {
-        assert!(x < self.width);
-        assert!(y < self.height);
-        let size = (self.width * self.height) as usize;
+        assert!(x < self.conf.width);
+        assert!(y < self.conf.height);
+        let size = (self.conf.width * self.conf.height) as usize;
         assert_eq!(self.occupancy.len() % size, 0);
         assert!(cycle < (self.occupancy.len() / size) as u32);
 
-        self.occupancy[(cycle * self.width * self.height + y * self.width + x) as usize]
+        self.occupancy
+            [(cycle * self.conf.width * self.conf.height + y * self.conf.width + x) as usize]
     }
 
     // Returns true if any operation is scheduled for `qubit` at or after `cycle`.
@@ -564,12 +578,12 @@ impl Board {
 
     fn set_occupancy(&mut self, x: u32, y: u32, cycle: u32, occupancy: BoardOccupancy) {
         use BoardOccupancy::*;
-        assert!(x < self.width);
-        assert!(y < self.height);
-        let size = (self.width * self.height) as usize;
+        assert!(x < self.conf.width);
+        assert!(y < self.conf.height);
+        let size = (self.conf.width * self.conf.height) as usize;
         assert_eq!(self.occupancy.len() % size, 0);
         assert!(cycle < (self.occupancy.len() / size) as u32);
-        let index = (cycle * self.width * self.height + y * self.width + x) as usize;
+        let index = (cycle * self.conf.width * self.conf.height + y * self.conf.width + x) as usize;
         assert!(self.occupancy[index] == Vacant || self.occupancy[index] == IdleDataQubit);
 
         self.occupancy[index] = occupancy;
@@ -616,17 +630,17 @@ impl<T: Clone + Default> IndexMut<(u32, u32)> for Map2D<T> {
 
 impl AncillaAvailability {
     fn new(board: &Board, cycle_range: Range<u32>) -> Self {
-        let size = (board.width * board.height) as usize;
+        let size = (board.width() * board.height()) as usize;
         let mut map = AncillaAvailability {
             map: Map2D {
-                width: board.width,
-                height: board.height,
+                width: board.width(),
+                height: board.height(),
                 map: vec![false; size],
             },
         };
 
-        for y in 0..board.height {
-            for x in 0..board.width {
+        for y in 0..board.height() {
+            for x in 0..board.width() {
                 map[(x, y)] = board.is_vacant(x, y, cycle_range.clone());
             }
         }
@@ -679,13 +693,25 @@ mod tests {
         Axis::new(v)
     }
 
+    fn new_board(mapping: DataQubitMapping, code_distance: u32) -> Board {
+        let conf = Configuration {
+            width: mapping.width,
+            height: mapping.height,
+            code_distance,
+            magic_state_distillation_cost: 0,
+            magic_state_distillation_success_rate: 0.0,
+        };
+
+        Board::new(mapping, &conf)
+    }
+
     #[test]
     fn test_init_board() {
         let mut mapping = DataQubitMapping::new(3, 4);
         mapping.map(Qubit::new(6), 0, 0);
         mapping.map(Qubit::new(7), 2, 2);
 
-        let board = Board::new(mapping, 5);
+        let board = new_board(mapping, 5);
 
         assert_eq!(board.width(), 3);
         assert_eq!(board.height(), 4);
@@ -701,7 +727,7 @@ mod tests {
         let mut mapping = DataQubitMapping::new(3, 4);
         mapping.map(Qubit::new(6), 0, 0);
         mapping.map(Qubit::new(7), 2, 2);
-        let mut board = Board::new(mapping, 5);
+        let mut board = new_board(mapping, 5);
 
         board.ensure_board_occupancy(0);
         assert_eq!(board.occupancy.len(), 3 * 4);
@@ -731,7 +757,7 @@ mod tests {
         let mut mapping = DataQubitMapping::new(3, 4);
         mapping.map(Qubit::new(6), 0, 0);
         mapping.map(Qubit::new(7), 2, 2);
-        let mut board = Board::new(mapping, 5);
+        let mut board = new_board(mapping, 5);
 
         board.ensure_board_occupancy(5);
         for cycle in 0..6 {
@@ -801,7 +827,7 @@ mod tests {
         mapping.map(Qubit::new(0), 0, 0);
         mapping.map(Qubit::new(1), 1, 1);
         mapping.map(Qubit::new(2), 2, 2);
-        let mut board = Board::new(mapping, 5);
+        let mut board = new_board(mapping, 5);
         board.ensure_board_occupancy(6);
 
         for cycle in 0..6 {
@@ -852,7 +878,7 @@ mod tests {
         mapping.map(Qubit::new(0), 0, 0);
         mapping.map(Qubit::new(1), 1, 1);
         mapping.map(Qubit::new(2), 2, 2);
-        let mut board = Board::new(mapping, 5);
+        let mut board = new_board(mapping, 5);
         board.ensure_board_occupancy(6);
 
         let id = board.issue_operation_id();
@@ -927,7 +953,7 @@ mod tests {
         mapping.map(Qubit::new(0), 0, 0);
         mapping.map(Qubit::new(1), 1, 1);
         mapping.map(Qubit::new(2), 2, 2);
-        let mut board = Board::new(mapping, 3);
+        let mut board = new_board(mapping, 3);
         board.ensure_board_occupancy(5);
 
         let id = board.issue_operation_id();
@@ -988,7 +1014,7 @@ mod tests {
         mapping.map(Qubit::new(0), 0, 1);
         mapping.map(Qubit::new(1), 1, 1);
         mapping.map(Qubit::new(2), 2, 1);
-        let mut board = Board::new(mapping, 3);
+        let mut board = new_board(mapping, 3);
         board.ensure_board_occupancy(0);
 
         let id = board.issue_operation_id();
@@ -1046,7 +1072,7 @@ mod tests {
         mapping.map(Qubit::new(0), 1, 0);
         mapping.map(Qubit::new(1), 1, 1);
         mapping.map(Qubit::new(2), 1, 2);
-        let mut board = Board::new(mapping, 3);
+        let mut board = new_board(mapping, 3);
         board.ensure_board_occupancy(0);
 
         let id = board.issue_operation_id();
@@ -1105,7 +1131,7 @@ mod tests {
         mapping.map(Qubit::new(0), 0, 0);
         mapping.map(Qubit::new(1), 1, 1);
         mapping.map(Qubit::new(2), 3, 2);
-        let mut board = Board::new(mapping, 3);
+        let mut board = new_board(mapping, 3);
 
         board.ensure_board_occupancy(12);
         let id = board.issue_operation_id();
@@ -1249,7 +1275,7 @@ mod tests {
         let mut mapping = DataQubitMapping::new(2, 2);
         mapping.map(Qubit::new(0), 0, 0);
         mapping.map(Qubit::new(1), 1, 1);
-        let mut board = Board::new(mapping, 3);
+        let mut board = new_board(mapping, 3);
         board.ensure_board_occupancy(0);
         let id = board.issue_operation_id();
         board.set_occupancy(0, 0, 0, DataQubitInOperation(id));
@@ -1266,7 +1292,7 @@ mod tests {
         let mut mapping = DataQubitMapping::new(2, 2);
         mapping.map(Qubit::new(0), 0, 0);
         mapping.map(Qubit::new(1), 1, 1);
-        let mut board = Board::new(mapping, 3);
+        let mut board = new_board(mapping, 3);
         assert!(!board.schedule(&Operator::PauliRotation(PauliRotation {
             angle: Angle::PiOver4,
             axis: new_axis("XX")
@@ -1280,7 +1306,7 @@ mod tests {
         let mut mapping = DataQubitMapping::new(3, 3);
         mapping.map(Qubit::new(0), 0, 0);
         mapping.map(Qubit::new(1), 2, 2);
-        let mut board = Board::new(mapping, 3);
+        let mut board = new_board(mapping, 3);
         board.ensure_board_occupancy(3);
         let id = board.issue_operation_id();
         board.set_occupancy(1, 0, 2, LatticeSurgery(id));
@@ -1297,7 +1323,7 @@ mod tests {
         let mut mapping = DataQubitMapping::new(2, 2);
         mapping.map(Qubit::new(0), 0, 0);
         mapping.map(Qubit::new(1), 1, 1);
-        let mut board = Board::new(mapping, 3);
+        let mut board = new_board(mapping, 3);
         board.ensure_board_occupancy(3);
 
         assert!(!board.schedule(&Operator::PauliRotation(PauliRotation {
@@ -1314,7 +1340,7 @@ mod tests {
         let mut mapping = DataQubitMapping::new(3, 1);
         mapping.map(Qubit::new(0), 0, 0);
         mapping.map(Qubit::new(1), 2, 0);
-        let mut board = Board::new(mapping, 3);
+        let mut board = new_board(mapping, 3);
         board.ensure_board_occupancy(3);
         let id = board.issue_operation_id();
         board.set_occupancy(1, 0, 3, LatticeSurgery(id));
@@ -1332,7 +1358,7 @@ mod tests {
         let mut mapping = DataQubitMapping::new(2, 3);
         mapping.map(Qubit::new(0), 0, 0);
         mapping.map(Qubit::new(1), 0, 2);
-        let mut board = Board::new(mapping, 3);
+        let mut board = new_board(mapping, 3);
         board.ensure_board_occupancy(3);
         let id = board.issue_operation_id();
         board.set_occupancy(0, 1, 3, LatticeSurgery(id));
@@ -1349,7 +1375,7 @@ mod tests {
         let mut mapping = DataQubitMapping::new(2, 4);
         mapping.map(Qubit::new(0), 0, 1);
         mapping.map(Qubit::new(1), 0, 2);
-        let mut board = Board::new(mapping, 3);
+        let mut board = new_board(mapping, 3);
 
         assert!(!board.schedule(&Operator::PauliRotation(PauliRotation {
             angle: Angle::PiOver4,
@@ -1365,7 +1391,7 @@ mod tests {
         let mut mapping = DataQubitMapping::new(width, height);
         mapping.map(Qubit::new(0), 0, 0);
         mapping.map(Qubit::new(1), 1, 3);
-        let mut board = Board::new(mapping, 3);
+        let mut board = new_board(mapping, 3);
         board.ensure_board_occupancy(11);
         board.set_occupancy(1, 1, 3, YMeasurement);
         board.set_occupancy(1, 2, 4, YMeasurement);
@@ -1419,7 +1445,7 @@ mod tests {
         let mut mapping = DataQubitMapping::new(width, height);
         mapping.map(Qubit::new(0), 0, 0);
         mapping.map(Qubit::new(1), 1, 3);
-        let mut board = Board::new(mapping, 3);
+        let mut board = new_board(mapping, 3);
         board.ensure_board_occupancy(4);
         board.set_occupancy(1, 1, 3, YInitialization);
         board.set_occupancy(1, 2, 4, YInitialization);
@@ -1474,7 +1500,7 @@ mod tests {
         let mut mapping = DataQubitMapping::new(width, height);
         mapping.map(Qubit::new(0), 0, 1);
         mapping.map(Qubit::new(1), 0, 2);
-        let mut board = Board::new(mapping, 3);
+        let mut board = new_board(mapping, 3);
 
         assert!(board.schedule(&Operator::PauliRotation(PauliRotation {
             angle: Angle::PiOver4,
