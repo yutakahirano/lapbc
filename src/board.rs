@@ -1,4 +1,5 @@
-use std::collections::VecDeque;
+use std::cmp::max;
+use std::collections::{HashSet, VecDeque};
 use std::ops::{Index, IndexMut};
 use std::{collections::HashMap, ops::Range};
 
@@ -29,6 +30,7 @@ pub struct Board {
     cycle_after_last_operation_at: Vec<u32>,
     cycle: u32,
     current_operation_id: OperationId,
+    preferable_distillation_area_size: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +41,8 @@ pub struct Configuration {
     code_distance: u32,
     // The cycle needed to distill a magic state.
     magic_state_distillation_cost: u32,
+    // The number of distillations needed for each pi/8 rotation.
+    num_distillations_for_pi_over_8_rotation: u32,
     // The probability to distill a magic state successfully.
     magic_state_distillation_success_rate: f64,
 }
@@ -77,11 +81,12 @@ impl Board {
 
         Self {
             conf: conf.clone(),
-            data_qubit_mapping: mapping.iter().map(|(x, y, q)| (*q, (*x, *y))).collect(),
+            data_qubit_mapping: mapping.iter().map(|&(x, y, q)| (q, (x, y))).collect(),
             occupancy,
             cycle_after_last_operation_at: vec![],
             cycle: 0,
             current_operation_id,
+            preferable_distillation_area_size: 1,
         }
     }
 
@@ -254,18 +259,7 @@ impl Board {
                 continue;
             }
             let mut candidates = vec![];
-            if x > 0 {
-                candidates.push((x - 1, y));
-            }
-            if x + 1 < self.conf.width {
-                candidates.push((x + 1, y));
-            }
-            if y > 0 {
-                candidates.push((x, y - 1));
-            }
-            if y + 1 < self.conf.height {
-                candidates.push((x, y + 1));
-            }
+            self.add_neighbors(x, y, &mut candidates);
             adjacent_ancilla_candidates.extend(
                 candidates
                     .iter()
@@ -512,10 +506,259 @@ impl Board {
     fn schedule_pi_over_8_rotation(&mut self, rotation: &PauliRotation) -> bool {
         let support_size = rotation.axis.iter().filter(|a| **a != Pauli::I).count();
         if support_size == 1 {
-            unimplemented!("schedule_pi_over_4_rotation: support size = 1");
+            let target_position = rotation.axis.iter().position(|a| *a != Pauli::I).unwrap();
+            let target = Qubit::new(target_position);
+            self.schedule_single_qubit_pi_over_8_rotation(
+                target,
+                rotation.axis[target_position],
+                self.conf.num_distillations_for_pi_over_8_rotation,
+                self.preferable_distillation_area_size,
+            )
         } else {
-            unimplemented!("schedule_pi_over_4_rotation: support size > 1");
+            unimplemented!("schedule_pi_over_8_rotation: support size > 1");
         }
+    }
+
+    fn get_num_preflight_distillations(&self, x: u32, y: u32, cycle: u32) -> u32 {
+        let mut c = cycle;
+        while c > 0 && self.get_occupancy(x, y, c) == BoardOccupancy::Vacant {
+            c -= 1;
+        }
+        (cycle - c) / self.conf.magic_state_distillation_cost
+    }
+
+    fn add_neighbors(&self, x: u32, y: u32, points: &mut Vec<(u32, u32)>) {
+        let width = self.conf.width;
+        let height = self.conf.height;
+        if x > 0 {
+            points.push((x - 1, y));
+        }
+        if x + 1 < width {
+            points.push((x + 1, y));
+        }
+        if y > 0 {
+            points.push((x, y - 1));
+        }
+        if y + 1 < height {
+            points.push((x, y + 1));
+        }
+    }
+
+    fn schedule_single_qubit_pi_over_8_rotation(
+        &mut self,
+        qubit: Qubit,
+        axis: Pauli,
+        num_distillations: u32,
+        preferable_distillation_area_size: u32,
+    ) -> bool {
+        assert!(preferable_distillation_area_size > 0);
+        let (x, y) = self.data_qubit_mapping[&qubit];
+        let width = self.conf.width;
+        let height = self.conf.height;
+        let distance = self.conf.code_distance;
+        let cycle = self.cycle;
+        let up_to = cycle + distance + y_measurement_cost(distance);
+        self.ensure_board_occupancy(up_to);
+        if self.has_schedule_at_or_after(qubit, cycle) {
+            return false;
+        }
+
+        let mut q = VecDeque::new();
+        match axis {
+            Pauli::I => return true,
+            Pauli::X => {
+                if x > 0 {
+                    q.push_back((0_u32, vec![(x - 1, y)], vec![]));
+                }
+                if x + 1 < width {
+                    q.push_back((0_u32, vec![(x + 1, y)], vec![]));
+                }
+            }
+            Pauli::Z => {
+                if y > 0 {
+                    q.push_back((0_u32, vec![(x, y - 1)], vec![]));
+                }
+                if y + 1 < height {
+                    q.push_back((0_u32, vec![(x, y + 1)], vec![]));
+                }
+            }
+            Pauli::Y => {
+                let mut routing_patterns = vec![];
+                // We use this to avoid integer underflow. In any case, a value with underflow will
+                // not be used because it will be filtered out by `cond1` and `cond2`.
+                let pre = |x: u32| x.wrapping_sub(1);
+                let available = |(x, y)| self.is_vacant(x, y, cycle..cycle + distance);
+                let mut run = |cond1, cond2, p1, p2, p3| {
+                    if cond1 && cond2 && available(p1) && available(p2) && available(p3) {
+                        routing_patterns.push((p1, p2, p3));
+                    }
+                };
+
+                run(x > 0, y > 0, (pre(x), y), (pre(x), pre(y)), (x, pre(y)));
+                run(x > 0, y + 1 < height, (pre(x), y), (pre(x), y + 1), (x, y + 1));
+                run(x + 1 < width, y > 0, (x + 1, y), (x + 1, pre(y)), (x, pre(y)));
+                run(x + 1 < width, y + 1 < height, (x + 1, y), (x + 1, y + 1), (x, y + 1));
+
+                for ((x1, y1), (x2, y2), (x3, y3)) in routing_patterns {
+                    let mut points = vec![];
+                    self.add_neighbors(x1, y1, &mut points);
+                    self.add_neighbors(x2, y2, &mut points);
+                    self.add_neighbors(x3, y3, &mut points);
+
+                    for p in points {
+                        if p != (x, y) && p != (x1, y1) && p != (x2, y2) && p != (x3, y3) {
+                            q.push_back((0_u32, vec![p], vec![(x1, y1), (x2, y2), (x3, y3)]));
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut visited = HashSet::new();
+        let mut candidates = vec![];
+
+        while let Some((num_distillations_so_far, history, routing_qubits)) = q.pop_front() {
+            assert!(!history.is_empty());
+            let mut sorted_history = history.clone();
+            sorted_history.sort();
+            if visited.contains(&sorted_history) {
+                continue;
+            }
+            visited.insert(sorted_history);
+
+            let (x, y) = history[history.len() - 1];
+            if !self.is_vacant(x, y, cycle..cycle + distance) {
+                // This position is not eligible.
+                continue;
+            }
+
+            let num_distillations_so_far =
+                num_distillations_so_far + self.get_num_preflight_distillations(x, y, cycle);
+
+            if num_distillations_so_far >= num_distillations {
+                candidates.push((
+                    num_distillations_so_far,
+                    history.clone(),
+                    routing_qubits.clone(),
+                ));
+            }
+
+            if history.len() >= preferable_distillation_area_size as usize {
+                continue;
+            }
+
+            if x > 0 && !history.contains(&(x - 1, y)) && !routing_qubits.contains(&(x - 1, y)) {
+                let mut new_history = history.clone();
+                new_history.push((x - 1, y));
+                q.push_back((num_distillations_so_far, new_history, routing_qubits.clone()));
+            }
+            if x + 1 < width
+                && !history.contains(&(x + 1, y))
+                && !routing_qubits.contains(&(x + 1, y))
+            {
+                let mut new_history = history.clone();
+                new_history.push((x + 1, y));
+                q.push_back((num_distillations_so_far, new_history, routing_qubits.clone()));
+            }
+            if y > 0 && !history.contains(&(x, y - 1)) && !routing_qubits.contains(&(x, y - 1)) {
+                let mut new_history = history.clone();
+                new_history.push((x, y - 1));
+                q.push_back((num_distillations_so_far, new_history, routing_qubits.clone()));
+            }
+            if y + 1 < height
+                && !history.contains(&(x, y + 1))
+                && !routing_qubits.contains(&(x, y + 1))
+            {
+                let mut new_history = history;
+                new_history.push((x, y + 1));
+                q.push_back((num_distillations_so_far, new_history, routing_qubits));
+            }
+        }
+
+        if candidates.is_empty() {
+            return false;
+        }
+
+        candidates.sort_by(|(ad, ahistory, _), (bd, bhistory, _)| {
+            ahistory.len().cmp(&bhistory.len()).then_with(|| bd.cmp(ad))
+        });
+
+        for (_, distillation_area, routing_qubits) in &candidates {
+            if self.place_gates_for_single_qubit_pi_over_8_rotation(
+                x,
+                y,
+                distillation_area,
+                routing_qubits,
+            ) {
+                self.set_cycle_after_last_operation_at(qubit, cycle + distance);
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn place_gates_for_single_qubit_pi_over_8_rotation(
+        &mut self,
+        x: u32,
+        y: u32,
+        distillation_area: &[(u32, u32)],
+        routing_qubits: &[(u32, u32)],
+    ) -> bool {
+        let cycle = self.cycle;
+        let distance = self.conf.code_distance;
+        let distillation_cost = self.conf.magic_state_distillation_cost;
+        let y_measurement_cost = y_measurement_cost(distance);
+        let correction_range = cycle + distance..cycle + distance + y_measurement_cost;
+
+        let correction_position = distillation_area
+            .iter()
+            .find(|&&(x, y)| self.is_vacant(x, y, correction_range.clone()));
+        let correction_position = match correction_position {
+            Some(q) => q,
+            None => return false,
+        };
+
+        let id = self.issue_operation_id();
+
+        for c in cycle..cycle + distance {
+            self.set_occupancy(x, y, c, BoardOccupancy::DataQubitInOperation(id));
+        }
+        for &(x, y) in routing_qubits {
+            for c in cycle..cycle + distance {
+                self.set_occupancy(x, y, c, BoardOccupancy::LatticeSurgery(id));
+            }
+        }
+        for &(x, y) in distillation_area {
+            let mut c = cycle;
+            while c >= distillation_cost && self.is_vacant(x, y, c - distillation_cost..c) {
+                c -= distillation_cost;
+            }
+            let distillation_start = c;
+            for c in distillation_start..cycle {
+                self.set_occupancy(x, y, c, BoardOccupancy::MagicStateDistillation(id));
+            }
+
+            for c in cycle..cycle + distance {
+                self.set_occupancy(x, y, c, BoardOccupancy::LatticeSurgery(id));
+            }
+        }
+
+        for c in correction_range {
+            let &(x, y) = correction_position;
+            self.set_occupancy(x, y, c, BoardOccupancy::YMeasurement);
+        }
+
+        true
+    }
+
+    fn schedule_single_qubit_pi_over_8_rotation_with_distillation_area(
+        &mut self,
+        qubit: Qubit,
+        axis: Pauli,
+        distillation_area: Vec<(u32, u32)>,
+    ) -> bool {
+        unimplemented!("schedule_pi_over_8_rotation: support size = 1");
     }
 
     fn ensure_board_occupancy(&mut self, cycle: u32) {
@@ -534,9 +777,9 @@ impl Board {
             for (_q, (x, y)) in &self.data_qubit_mapping {
                 let o = BoardOccupancy::IdleDataQubit;
                 // We don't use set_occupancy here in order to avoid Rust borrow checker complaints.
-                self.occupancy
-                    [(c * self.conf.width * self.conf.height + y * self.conf.width + x) as usize] =
-                    o;
+                let index =
+                    (c * self.conf.width * self.conf.height + y * self.conf.width + x) as usize;
+                self.occupancy[index] = o;
             }
         }
     }
@@ -673,8 +916,6 @@ impl IndexMut<(u32, u32)> for AncillaAvailability {
 
 #[cfg(test)]
 mod tests {
-    use clap::Id;
-
     use crate::{mapping::DataQubitMapping, pbc::Axis};
 
     use super::*;
@@ -699,6 +940,7 @@ mod tests {
             height: mapping.height,
             code_distance,
             magic_state_distillation_cost: 0,
+            num_distillations_for_pi_over_8_rotation: 1,
             magic_state_distillation_success_rate: 0.0,
         };
 
@@ -1535,5 +1777,311 @@ mod tests {
         assert!(board.is_occupancy(2, 1, 3..7, Vacant));
         assert!(board.is_occupancy(2, 2, 3..7, Vacant));
         assert!(board.is_occupancy(2, 3, 3..7, Vacant));
+    }
+
+    #[test]
+    fn test_schedule_pi_over_8_rotation_used_qubit() {
+        let width = 3_u32;
+        let height = 4_u32;
+        let mut mapping = DataQubitMapping::new(width, height);
+        let q = Qubit::new(0);
+        mapping.map(q, 0, 1);
+        mapping.map(Qubit::new(1), 0, 2);
+        let conf = Configuration {
+            width,
+            height,
+            code_distance: 3,
+            magic_state_distillation_cost: 5,
+            num_distillations_for_pi_over_8_rotation: 1,
+            magic_state_distillation_success_rate: 0.8,
+        };
+        let mut board = Board::new(mapping, &conf);
+
+        board.set_cycle_after_last_operation_at(q, 1000);
+        assert!(!board.schedule(&Operator::PauliRotation(PauliRotation {
+            angle: Angle::PiOver8,
+            axis: new_axis("Z")
+        })));
+
+        board.cycle = 999;
+        assert!(!board.schedule(&Operator::PauliRotation(PauliRotation {
+            angle: Angle::PiOver8,
+            axis: new_axis("Z")
+        })));
+    }
+
+    #[test]
+    fn test_schedule_pi_over_8_rotation_no_space_for_distillation() {
+        use BoardOccupancy::*;
+        let width = 3_u32;
+        let height = 4_u32;
+        let mut mapping = DataQubitMapping::new(width, height);
+        mapping.map(Qubit::new(0), 0, 1);
+        mapping.map(Qubit::new(1), 0, 2);
+        let conf = Configuration {
+            width,
+            height,
+            code_distance: 3,
+            magic_state_distillation_cost: 5,
+            num_distillations_for_pi_over_8_rotation: 1,
+            magic_state_distillation_success_rate: 0.8,
+        };
+        let mut board = Board::new(mapping, &conf);
+        board.ensure_board_occupancy(10);
+        board.set_occupancy(1, 1, 0, YMeasurement);
+        board.set_occupancy(0, 1, 0, YMeasurement);
+        board.set_occupancy(0, 3, 0, YInitialization);
+        assert!(!board.schedule(&Operator::PauliRotation(PauliRotation {
+            angle: Angle::PiOver8,
+            axis: new_axis("XI")
+        })));
+
+        assert!(!board.schedule(&Operator::PauliRotation(PauliRotation {
+            angle: Angle::PiOver8,
+            axis: new_axis("IZ")
+        })));
+    }
+
+    #[test]
+    fn test_schedule_pi_over_8_rotation_no_space_for_correction() {
+        use BoardOccupancy::*;
+        let width = 3_u32;
+        let height = 4_u32;
+        let mut mapping = DataQubitMapping::new(width, height);
+        mapping.map(Qubit::new(0), 0, 0);
+        let conf = Configuration {
+            width,
+            height,
+            code_distance: 3,
+            magic_state_distillation_cost: 5,
+            num_distillations_for_pi_over_8_rotation: 1,
+            magic_state_distillation_success_rate: 0.8,
+        };
+        let mut board = Board::new(mapping, &conf);
+        board.ensure_board_occupancy(10);
+        board.set_occupancy(0, 1, 8, YMeasurement);
+
+        board.cycle = 5;
+        assert!(!board.schedule_single_qubit_pi_over_8_rotation(Qubit::new(0), Pauli::Z, 1, 1));
+    }
+
+    #[test]
+    fn test_schedule_pi_over_8_z_rotation() {
+        use BoardOccupancy::*;
+        let width = 3_u32;
+        let height = 4_u32;
+
+        let mut mapping = DataQubitMapping::new(width, height);
+        mapping.map(Qubit::new(0), 0, 1);
+        mapping.map(Qubit::new(1), 0, 2);
+        let conf = Configuration {
+            width,
+            height,
+            code_distance: 3,
+            magic_state_distillation_cost: 5,
+
+            num_distillations_for_pi_over_8_rotation: 1,
+            magic_state_distillation_success_rate: 0.8,
+        };
+        let mut board = Board::new(mapping, &conf);
+        assert!(!board.schedule_single_qubit_pi_over_8_rotation(Qubit::new(0), Pauli::Z, 5, 2));
+
+        board.cycle = 5;
+        assert!(!board.schedule_single_qubit_pi_over_8_rotation(Qubit::new(0), Pauli::Z, 5, 2));
+
+        board.cycle = 10;
+        assert!(!board.schedule_single_qubit_pi_over_8_rotation(Qubit::new(0), Pauli::Z, 5, 2));
+
+        assert!(board.is_occupancy(0, 0, 0..16, Vacant));
+        assert!(board.is_occupancy(0, 1, 0..16, IdleDataQubit));
+        assert!(board.is_occupancy(0, 2, 0..16, IdleDataQubit));
+        assert!(board.is_occupancy(0, 3, 0..16, Vacant));
+        assert!(board.is_occupancy(1, 0, 0..16, Vacant));
+        assert!(board.is_occupancy(1, 1, 0..16, Vacant));
+        assert!(board.is_occupancy(1, 2, 0..16, Vacant));
+        assert!(board.is_occupancy(1, 3, 0..16, Vacant));
+        assert!(board.is_occupancy(2, 0, 0..16, Vacant));
+        assert!(board.is_occupancy(2, 1, 0..16, Vacant));
+        assert!(board.is_occupancy(2, 2, 0..16, Vacant));
+        assert!(board.is_occupancy(2, 3, 0..16, Vacant));
+
+        assert!(!board.has_schedule_at_or_after(Qubit::new(0), 0));
+        assert!(!board.has_schedule_at_or_after(Qubit::new(1), 0));
+
+        board.cycle = 15;
+        assert!(board.schedule_single_qubit_pi_over_8_rotation(Qubit::new(0), Pauli::Z, 5, 2));
+        let id = OperationId { id: 0 };
+
+        assert!(board.is_occupancy(0, 0, 0..15, MagicStateDistillation(id)));
+        assert!(board.is_occupancy(0, 0, 15..18, LatticeSurgery(id)));
+        assert!(board.is_occupancy(0, 0, 18..21, YMeasurement));
+        assert!(board.is_occupancy(0, 1, 0..15, IdleDataQubit));
+        assert!(board.is_occupancy(0, 1, 15..18, DataQubitInOperation(id)));
+        assert!(board.is_occupancy(0, 1, 18..21, IdleDataQubit));
+        assert!(board.is_occupancy(0, 2, 0..21, IdleDataQubit));
+        assert!(board.is_occupancy(0, 3, 0..21, Vacant));
+        assert!(board.is_occupancy(1, 0, 0..15, MagicStateDistillation(id)));
+        assert!(board.is_occupancy(1, 0, 15..18, LatticeSurgery(id)));
+        assert!(board.is_occupancy(1, 0, 18..21, Vacant));
+        assert!(board.is_occupancy(1, 1, 0..21, Vacant));
+        assert!(board.is_occupancy(1, 2, 0..21, Vacant));
+        assert!(board.is_occupancy(1, 3, 0..21, Vacant));
+        assert!(board.is_occupancy(2, 0, 0..21, Vacant));
+        assert!(board.is_occupancy(2, 1, 0..21, Vacant));
+        assert!(board.is_occupancy(2, 2, 0..21, Vacant));
+        assert!(board.is_occupancy(2, 3, 0..21, Vacant));
+
+        assert!(board.has_schedule_at_or_after(Qubit::new(0), 17));
+        assert!(!board.has_schedule_at_or_after(Qubit::new(0), 18));
+        assert!(!board.has_schedule_at_or_after(Qubit::new(1), 0));
+    }
+
+    #[test]
+    fn test_schedule_pi_over_8_x_rotation() {
+        use BoardOccupancy::*;
+        let width = 3_u32;
+        let height = 4_u32;
+
+        let mut mapping = DataQubitMapping::new(width, height);
+        mapping.map(Qubit::new(0), 0, 1);
+        mapping.map(Qubit::new(1), 0, 2);
+        let conf = Configuration {
+            width,
+            height,
+            code_distance: 3,
+            magic_state_distillation_cost: 5,
+            num_distillations_for_pi_over_8_rotation: 1,
+            magic_state_distillation_success_rate: 0.8,
+        };
+        let mut board = Board::new(mapping, &conf);
+        assert!(!board.schedule_single_qubit_pi_over_8_rotation(Qubit::new(0), Pauli::X, 5, 2));
+
+        board.cycle = 5;
+        assert!(!board.schedule_single_qubit_pi_over_8_rotation(Qubit::new(0), Pauli::X, 5, 2));
+
+        board.cycle = 10;
+        assert!(!board.schedule_single_qubit_pi_over_8_rotation(Qubit::new(0), Pauli::X, 5, 2));
+
+        assert!(board.is_occupancy(0, 0, 0..16, Vacant));
+        assert!(board.is_occupancy(0, 1, 0..16, IdleDataQubit));
+        assert!(board.is_occupancy(0, 2, 0..16, IdleDataQubit));
+        assert!(board.is_occupancy(0, 3, 0..16, Vacant));
+        assert!(board.is_occupancy(1, 0, 0..16, Vacant));
+        assert!(board.is_occupancy(1, 1, 0..16, Vacant));
+        assert!(board.is_occupancy(1, 2, 0..16, Vacant));
+        assert!(board.is_occupancy(1, 3, 0..16, Vacant));
+        assert!(board.is_occupancy(2, 0, 0..16, Vacant));
+        assert!(board.is_occupancy(2, 1, 0..16, Vacant));
+        assert!(board.is_occupancy(2, 2, 0..16, Vacant));
+        assert!(board.is_occupancy(2, 3, 0..16, Vacant));
+
+        board.cycle = 15;
+        assert!(board.schedule_single_qubit_pi_over_8_rotation(Qubit::new(0), Pauli::X, 5, 2));
+
+        let id = OperationId { id: 0 };
+
+        assert!(board.is_occupancy(0, 0, 0..21, Vacant));
+        assert!(board.is_occupancy(0, 1, 0..15, IdleDataQubit));
+        assert!(board.is_occupancy(0, 1, 15..18, DataQubitInOperation(id)));
+        assert!(board.is_occupancy(0, 1, 18..21, IdleDataQubit));
+        assert!(board.is_occupancy(0, 2, 0..21, IdleDataQubit));
+        assert!(board.is_occupancy(0, 3, 0..21, Vacant));
+        assert!(board.is_occupancy(1, 0, 0..21, Vacant));
+        assert!(board.is_occupancy(1, 1, 0..15, MagicStateDistillation(id)));
+        assert!(board.is_occupancy(1, 1, 15..18, LatticeSurgery(id)));
+        assert!(board.is_occupancy(1, 1, 18..21, YMeasurement));
+        assert!(board.is_occupancy(1, 2, 0..21, Vacant));
+        assert!(board.is_occupancy(1, 3, 0..21, Vacant));
+        assert!(board.is_occupancy(2, 0, 0..21, Vacant));
+        assert!(board.is_occupancy(2, 1, 0..15, MagicStateDistillation(id)));
+        assert!(board.is_occupancy(2, 1, 15..18, LatticeSurgery(id)));
+        assert!(board.is_occupancy(2, 1, 18..21, Vacant));
+        assert!(board.is_occupancy(2, 2, 0..21, Vacant));
+        assert!(board.is_occupancy(2, 3, 0..21, Vacant));
+        assert!(board.has_schedule_at_or_after(Qubit::new(0), 17));
+        assert!(!board.has_schedule_at_or_after(Qubit::new(0), 18));
+        assert!(!board.has_schedule_at_or_after(Qubit::new(1), 0));
+    }
+
+    #[test]
+    fn test_schedule_pi_over_8_y_rotation() {
+        use BoardOccupancy::*;
+        let width = 3_u32;
+        let height = 4_u32;
+
+        let mut mapping = DataQubitMapping::new(width, height);
+        mapping.map(Qubit::new(0), 0, 1);
+        mapping.map(Qubit::new(1), 0, 2);
+        let conf = Configuration {
+            width,
+            height,
+            code_distance: 3,
+            magic_state_distillation_cost: 5,
+            num_distillations_for_pi_over_8_rotation: 5,
+            magic_state_distillation_success_rate: 0.8,
+        };
+        let mut board = Board::new(mapping, &conf);
+        board.preferable_distillation_area_size = 3;
+        assert!(!board.schedule_rotation(&PauliRotation {
+            angle: Angle::PiOver8,
+            axis: new_axis("YI")
+        }));
+
+        board.cycle = 5;
+        assert!(!board.schedule_rotation(&PauliRotation {
+            angle: Angle::PiOver8,
+            axis: new_axis("YI")
+        }));
+
+        assert!(board.is_occupancy(0, 0, 0..8, Vacant));
+        assert!(board.is_occupancy(0, 1, 0..8, IdleDataQubit));
+        assert!(board.is_occupancy(0, 2, 0..8, IdleDataQubit));
+        assert!(board.is_occupancy(0, 3, 0..8, Vacant));
+        assert!(board.is_occupancy(1, 0, 0..8, Vacant));
+        assert!(board.is_occupancy(1, 1, 0..8, Vacant));
+        assert!(board.is_occupancy(1, 2, 0..8, Vacant));
+        assert!(board.is_occupancy(1, 3, 0..8, Vacant));
+        assert!(board.is_occupancy(2, 0, 0..8, Vacant));
+        assert!(board.is_occupancy(2, 1, 0..8, Vacant));
+        assert!(board.is_occupancy(2, 2, 0..8, Vacant));
+        assert!(board.is_occupancy(2, 3, 0..8, Vacant));
+
+        board.cycle = 10;
+        assert!(board.schedule_rotation(&PauliRotation {
+            angle: Angle::PiOver8,
+            axis: new_axis("YI")
+        }));
+
+        let id = OperationId { id: 0 };
+
+        assert!(board.is_occupancy(0, 0, 0..10, Vacant));
+        assert!(board.is_occupancy(0, 0, 10..13, LatticeSurgery(id)));
+        assert!(board.is_occupancy(0, 0, 13..16, Vacant));
+        assert!(board.is_occupancy(0, 1, 0..10, IdleDataQubit));
+        assert!(board.is_occupancy(0, 1, 10..13, DataQubitInOperation(id)));
+        assert!(board.is_occupancy(0, 1, 13..16, IdleDataQubit));
+        assert!(board.is_occupancy(0, 2, 0..16, IdleDataQubit));
+        assert!(board.is_occupancy(0, 3, 0..16, Vacant));
+        assert!(board.is_occupancy(1, 0, 0..10, Vacant));
+        assert!(board.is_occupancy(1, 0, 10..13, LatticeSurgery(id)));
+        assert!(board.is_occupancy(1, 0, 13..16, Vacant));
+        assert!(board.is_occupancy(1, 1, 0..10, Vacant));
+        assert!(board.is_occupancy(1, 1, 10..13, LatticeSurgery(id)));
+        assert!(board.is_occupancy(1, 1, 13..16, Vacant));
+        assert!(board.is_occupancy(1, 2, 0..10, MagicStateDistillation(id)));
+        assert!(board.is_occupancy(1, 2, 10..13, LatticeSurgery(id)));
+        assert!(board.is_occupancy(1, 2, 13..16, Vacant));
+        assert!(board.is_occupancy(1, 3, 0..16, Vacant));
+        assert!(board.is_occupancy(2, 0, 0..16, Vacant));
+        assert!(board.is_occupancy(2, 1, 0..10, MagicStateDistillation(id)));
+        assert!(board.is_occupancy(2, 1, 10..13, LatticeSurgery(id)));
+        assert!(board.is_occupancy(2, 1, 13..16, YMeasurement));
+        assert!(board.is_occupancy(2, 2, 0..10, MagicStateDistillation(id)));
+        assert!(board.is_occupancy(2, 2, 10..13, LatticeSurgery(id)));
+        assert!(board.is_occupancy(2, 2, 13..16, Vacant));
+        assert!(board.is_occupancy(2, 3, 0..16, Vacant));
+        assert!(board.has_schedule_at_or_after(Qubit::new(0), 12));
+        assert!(!board.has_schedule_at_or_after(Qubit::new(0), 13));
+        assert!(!board.has_schedule_at_or_after(Qubit::new(1), 0));
     }
 }
