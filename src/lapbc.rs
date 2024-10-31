@@ -391,13 +391,13 @@ mod tests {
     fn test_lapbc_compact_axis_permutation_1() {
         use Operator::PauliRotation as R;
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("I")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("I")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(perm, AxisPermutation::new(vec![]));
         }
 
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("X")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("X")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -406,7 +406,7 @@ mod tests {
         }
 
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("Y")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("Y")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -415,7 +415,7 @@ mod tests {
         }
 
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("Z")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("Z")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(perm, AxisPermutation::new(vec![]));
         }
@@ -425,13 +425,13 @@ mod tests {
     fn test_lapbc_compact_axis_permutation_2() {
         use Operator::PauliRotation as R;
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("IZ")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("IZ")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(perm, AxisPermutation::new(vec![]));
         }
 
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("XZ")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("XZ")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -440,7 +440,7 @@ mod tests {
         }
 
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("YX")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("YX")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -449,7 +449,7 @@ mod tests {
         }
 
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("XX")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("XX")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -460,7 +460,7 @@ mod tests {
             );
         }
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("YY")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("YY")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -476,13 +476,13 @@ mod tests {
     fn test_lapbc_compact_axis_permutation_odd() {
         use Operator::PauliRotation as R;
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("IZZ")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("IZZ")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(perm, AxisPermutation::new(vec![]));
         }
 
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("XZI")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("XZI")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -491,7 +491,7 @@ mod tests {
         }
 
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("ZZX")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("ZZX")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -500,7 +500,7 @@ mod tests {
         }
 
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("ZZY")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("ZZY")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -508,7 +508,7 @@ mod tests {
             );
         }
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("XXX")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("XXX")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -520,7 +520,7 @@ mod tests {
             );
         }
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("YXX")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("YXX")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -532,7 +532,7 @@ mod tests {
             );
         }
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("XYX")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("XYX")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -544,7 +544,7 @@ mod tests {
             );
         }
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("XXY")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("XXY")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -556,7 +556,7 @@ mod tests {
             );
         }
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("YYY")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("YYY")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -568,7 +568,7 @@ mod tests {
             );
         }
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("XYY")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("XYY")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -579,7 +579,7 @@ mod tests {
             );
         }
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("YXY")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("YXY")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -590,7 +590,7 @@ mod tests {
             );
         }
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("YYX")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("YYX")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -606,13 +606,13 @@ mod tests {
     fn test_lapbc_compact_axis_permutation_even() {
         use Operator::PauliRotation as R;
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("IZZI")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("IZZI")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(perm, AxisPermutation::new(vec![]));
         }
 
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("XZIY")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("XZIY")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -620,7 +620,7 @@ mod tests {
             );
         }
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("ZZXX")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("ZZXX")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -628,7 +628,7 @@ mod tests {
             );
         }
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("ZZXY")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("ZZXY")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -636,7 +636,7 @@ mod tests {
             );
         }
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("ZZYX")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("ZZYX")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -644,7 +644,7 @@ mod tests {
             );
         }
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("ZZYY")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("ZZYY")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -652,7 +652,7 @@ mod tests {
             );
         }
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("XXYY")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("XXYY")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -664,7 +664,7 @@ mod tests {
             );
         }
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("YYXX")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("YYXX")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -675,7 +675,7 @@ mod tests {
             );
         }
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("XXXX")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("XXXX")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -687,7 +687,7 @@ mod tests {
             );
         }
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("XXYX")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("XXYX")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -699,7 +699,7 @@ mod tests {
             );
         }
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("XXXY")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("XXXY")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -711,7 +711,7 @@ mod tests {
             );
         }
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("YYYY")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("YYYY")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -723,7 +723,7 @@ mod tests {
             );
         }
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("YYXY")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("YYXY")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
@@ -735,7 +735,7 @@ mod tests {
             );
         }
         {
-            let ops = vec![R(PauliRotation::new_clifford(new_axis("YYYX")))];
+            let ops = [R(PauliRotation::new_clifford(new_axis("YYYX")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
             assert_eq!(
                 perm,
