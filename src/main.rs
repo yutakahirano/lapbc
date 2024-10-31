@@ -553,8 +553,14 @@ fn main() {
     let processed_source = qasm::process(&source, &cwd);
     let mut tokens = qasm::lex(&processed_source);
     let ast = qasm::parse(&mut tokens);
+    let ast = match ast {
+        Ok(ast) => ast,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            return;
+        }
+    };
 
-    let ast = ast.unwrap();
     extract(&ast);
 }
 
