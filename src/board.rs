@@ -35,16 +35,16 @@ pub struct Board {
 
 #[derive(Debug, Clone)]
 pub struct Configuration {
-    width: u32,
-    height: u32,
+    pub width: u32,
+    pub height: u32,
     // The code distance.
-    code_distance: u32,
+    pub code_distance: u32,
     // The cycle needed to distill a magic state.
-    magic_state_distillation_cost: u32,
+    pub magic_state_distillation_cost: u32,
     // The number of distillations needed for each pi/8 rotation.
-    num_distillations_for_pi_over_8_rotation: u32,
+    pub num_distillations_for_pi_over_8_rotation: u32,
     // The probability to distill a magic state successfully.
-    magic_state_distillation_success_rate: f64,
+    pub magic_state_distillation_success_rate: f64,
 }
 
 struct Map2D<T: Clone + Default> {
@@ -128,6 +128,22 @@ impl Board {
             }
             Operator::PauliRotation(rotation) => self.schedule_rotation(rotation),
         }
+    }
+
+    pub fn increment_cycle(&mut self) {
+        self.cycle += 1;
+    }
+
+    pub fn set_cycle(&mut self, cycle: u32) {
+        self.cycle = cycle;
+    }
+
+    pub fn cycle(&self) -> u32 {
+        self.cycle
+    }
+
+    pub fn set_preferable_distillation_area_size(&mut self, size: u32) {
+        self.preferable_distillation_area_size = size;
     }
 
     fn schedule_mesuarement(&mut self, qubit: Qubit, axis: Pauli) -> bool {
@@ -475,7 +491,11 @@ impl Board {
 
                     for region in &src_y_history {
                         if region.contains(&s) {
-                            path.extend(region.iter());
+                            let filtered_region = region
+                                .iter()
+                                .filter(|&p| !path.contains(p))
+                                .collect::<Vec<_>>();
+                            path.extend(filtered_region);
                             break;
                         }
                     }
@@ -1508,6 +1528,10 @@ mod tests {
         assert_eq!(
             Board::path_between((3, 1, X), (5, 3, Y), &map),
             Some(vec![(3, 1), (4, 1), (5, 2), (4, 2), (4, 3), (5, 3)])
+        );
+        assert_eq!(
+            Board::path_between((3, 1, Y), (3, 3, Y), &map),
+            Some(vec![(3, 1), (3, 2), (2, 1), (2, 2), (2, 3), (3, 3)])
         );
     }
 

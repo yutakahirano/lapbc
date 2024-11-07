@@ -4,8 +4,11 @@ extern crate clap;
 // extern crate oq3_source_file;
 extern crate qasm;
 
+use board::Configuration;
 use clap::Parser;
+use lapbc::lapbc_compact_translation;
 use lapbc::LapbcCompactOperator;
+use pbc::Operator;
 use std::env;
 use std::fmt::Write;
 use std::io::IsTerminal;
@@ -21,6 +24,9 @@ struct Args {
     /// The filename of the QASM file to be translated.
     #[arg(short, long)]
     filename: String,
+
+    #[arg(short, long)]
+    mapping_filename: String,
 }
 
 use pbc::Angle;
@@ -318,6 +324,96 @@ fn translate_gate(
     Ok(())
 }
 
+fn extract(nodes: &[qasm::AstNode]) -> Option<(Vec<Operator>, Registers)> {
+    use qasm::AstNode;
+    let mut registers = Registers::new();
+    if !nodes.iter().all(|node| match node {
+        AstNode::QReg(..) => true,
+        AstNode::CReg(..) => true,
+        AstNode::Barrier(..) => false,
+        AstNode::Reset(..) => true,
+        AstNode::Measure(..) => true,
+        AstNode::ApplyGate(..) => true,
+        AstNode::Opaque(..) => false,
+        AstNode::Gate(..) => true,
+        AstNode::If(..) => false,
+    }) {
+        eprintln!("Unrecognized node in the AST");
+        return None;
+    }
+
+    let nodes = nodes
+        .iter()
+        .filter(|node| match node {
+            AstNode::QReg(..) => true,
+            AstNode::CReg(..) => true,
+            AstNode::Reset(..) => true,
+            AstNode::Measure(..) => true,
+            AstNode::ApplyGate(..) => true,
+
+            AstNode::Gate(..) => false,
+            AstNode::If(..) => false,
+            _ => unreachable!("We mustn't be here as we've already checked unsupported nodes."),
+        })
+        .collect::<Vec<_>>();
+
+    // Let's construct the registers first.
+    for node in &nodes {
+        match node {
+            AstNode::QReg(name, num_qubits) => {
+                if registers.is_qreg(name) || registers.is_creg(name) {
+                    println!("Duplicate register name: {}", name);
+                    return None;
+                }
+                if *num_qubits < 0 {
+                    println!("The number of qubits in a register must be non-negative");
+                    return None;
+                }
+                let num_qubits = *num_qubits as u32;
+                registers.add_qreg(name.clone(), num_qubits);
+            }
+            AstNode::CReg(name, num_bits) => {
+                if registers.is_qreg(name) || registers.is_creg(name) {
+                    println!("Duplicate register name: {}", name);
+                    return None;
+                }
+                if *num_bits < 0 {
+                    println!("The number of qubits in a register must be non-negative");
+                    return None;
+                }
+                let num_bits = *num_bits as u32;
+                registers.add_creg(name.clone(), num_bits);
+            }
+            _ => (),
+        }
+    }
+    let mut ops = Vec::new();
+    for node in &nodes {
+        match node {
+            AstNode::ApplyGate(name, args, angle_args) => {
+                if let Err(e) = translate_gate(name, args, angle_args, &registers, &mut ops) {
+                    println!("{}", e);
+                    return None;
+                }
+            }
+            AstNode::Measure(arg1, arg2) => {
+                if let Err(e) = translate_gate(
+                    "measure",
+                    &[arg1.clone(), arg2.clone()],
+                    &[],
+                    &registers,
+                    &mut ops,
+                ) {
+                    println!("{}", e);
+                    return None;
+                }
+            }
+            _ => (),
+        }
+    }
+    Some((ops, registers))
+}
+
 fn print_line_potentially_with_colors(line: &str) {
     if std::io::stdout().is_terminal() {
         let re = regex::Regex::new(r"([IXYZSH][IXYZSH]+)").unwrap();
@@ -344,7 +440,7 @@ fn print_line_potentially_with_colors(line: &str) {
     }
 }
 
-fn extract(nodes: &[qasm::AstNode]) -> Option<(Vec<PauliRotation>, Registers)> {
+fn extract_and_print(nodes: &[qasm::AstNode]) -> Option<(Vec<PauliRotation>, Registers)> {
     use qasm::AstNode;
     let mut registers = Registers::new();
     if !nodes.iter().all(|node| match node {
@@ -540,6 +636,7 @@ fn main() {
     let args = Args::parse();
     // Load the QASM file.
     let source = std::fs::read_to_string(args.filename.clone()).unwrap();
+    let mapping_source = std::fs::read_to_string(&args.mapping_filename).unwrap();
 
     // let result = syntax_to_semantics::parse_source_string(
     //     source.clone(),
@@ -561,7 +658,84 @@ fn main() {
         }
     };
 
-    extract(&ast);
+    let (ops, _) = match extract(&ast) {
+        Some((ops, registers)) => (ops, registers),
+        None => {
+            eprintln!("Error in extracting the AST");
+            return;
+        }
+    };
+
+    let ops = lapbc::lapbc_translation(&ops);
+    let mut start = 0_usize;
+    let mut layers = Vec::new();
+    while start < ops.len() {
+        let mut end = start + 1;
+        while end < ops.len()
+            && ops
+                .iter()
+                .take(end)
+                .skip(start)
+                .all(|op| op.axis().commutes_with(ops[end].axis()))
+        {
+            end += 1;
+        }
+        layers.push((start, end));
+
+        start = end;
+    }
+
+    let mapping = mapping::DataQubitMapping::new_from_json(&mapping_source).unwrap();
+    let conf = Configuration {
+        width: mapping.width,
+        height: mapping.height,
+        code_distance: 15,
+        magic_state_distillation_cost: 21,
+        magic_state_distillation_success_rate: 0.5,
+        num_distillations_for_pi_over_8_rotation: 6,
+    };
+
+    let mut board = board::Board::new(mapping, &conf);
+    board.set_preferable_distillation_area_size(6);
+
+    for (start, end) in layers {
+        println!();
+        let mut scheduled = vec![false; end - start];
+
+        board.set_cycle(std::cmp::max(board.cycle(), 200) - 200);
+
+        while scheduled.iter().any(|&b| !b) {
+            let mut scheduled_on_this_cycle = false;
+
+            for i in 0..end - start {
+                if scheduled[i] {
+                    continue;
+                }
+
+                let op = &ops[start + i];
+                if board.schedule(op) {
+                    let cycle = board.cycle();
+                    let line = format!("Schedule ops[{:3}] ({}) at cycle {}", start + i, op, cycle);
+                    print_line_potentially_with_colors(&line);
+                    scheduled[i] = true;
+                    scheduled_on_this_cycle = true;
+                }
+            }
+
+            if !scheduled_on_this_cycle {
+                board.increment_cycle();
+            }
+        }
+    }
+
+    println!("num cycles = {}", board.cycle());
+
+    let spc_ops = pbc::spc_translation(&ops);
+    println!(
+        "spc_ops.len = {}, cycles = {}",
+        spc_ops.len(),
+        spc_ops.len() * conf.code_distance as usize
+    );
 }
 
 // tests
