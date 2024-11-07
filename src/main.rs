@@ -696,18 +696,40 @@ fn main() {
     };
 
     let mut board = board::Board::new(mapping, &conf);
-    board.set_preferable_distillation_area_size(6);
+    board.set_preferable_distillation_area_size(5);
+    let mut schedule: Vec<(usize, Operator, u32)> = Vec::new();
 
-    for (start, end) in layers {
+    for (layer_index, (start, end)) in layers.iter().enumerate() {
         println!();
         let mut scheduled = vec![false; end - start];
 
         board.set_cycle(std::cmp::max(board.cycle(), 200) - 200);
 
+        let mut indices = (0..end - start).collect::<Vec<_>>();
+        if layer_index + 1 < layers.len() {
+            let (next_start, next_end) = layers[layer_index + 1];
+            assert_eq!(next_start, *end);
+            let num_commuting_ops_in_successive_layer = (*start..*end)
+                .map(|i| {
+                    (next_start..next_end)
+                        .filter(|&j| ops[i].axis().commutes_with(ops[j].axis()))
+                        .count()
+                })
+                .collect::<Vec<_>>();
+
+            indices.sort_by(|&i, &j| {
+                let ci = num_commuting_ops_in_successive_layer[i];
+                let cj = num_commuting_ops_in_successive_layer[j];
+                ci.cmp(&cj)
+            });
+        }
+        println!("indices = {:?} (+{})", indices, start);
+        let indices = indices;
+
         while scheduled.iter().any(|&b| !b) {
             let mut scheduled_on_this_cycle = false;
 
-            for i in 0..end - start {
+            for &i in &indices {
                 if scheduled[i] {
                     continue;
                 }
@@ -719,12 +741,24 @@ fn main() {
                     print_line_potentially_with_colors(&line);
                     scheduled[i] = true;
                     scheduled_on_this_cycle = true;
+                    schedule.push((start + i, op.clone(), cycle));
                 }
             }
 
             if !scheduled_on_this_cycle {
                 board.increment_cycle();
             }
+        }
+    }
+
+    // Check the validity of the schedule.
+    schedule.sort_by_key(|&(index, _, _)| index);
+    for (i, &(index, _, _)) in schedule.iter().enumerate() {
+        assert_eq!(i, index);
+    }
+    for (i, op, cycle) in &schedule {
+        for (_, op2, cycle2) in schedule.iter().skip(*i + 1) {
+            assert!(op.axis().commutes_with(op2.axis()) || *cycle < *cycle2);
         }
     }
 
