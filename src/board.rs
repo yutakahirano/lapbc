@@ -1,4 +1,3 @@
-use std::cmp::max;
 use std::collections::{HashSet, VecDeque};
 use std::ops::{Index, IndexMut};
 use std::{collections::HashMap, ops::Range};
@@ -772,15 +771,6 @@ impl Board {
         true
     }
 
-    fn schedule_single_qubit_pi_over_8_rotation_with_distillation_area(
-        &mut self,
-        qubit: Qubit,
-        axis: Pauli,
-        distillation_area: Vec<(u32, u32)>,
-    ) -> bool {
-        unimplemented!("schedule_pi_over_8_rotation: support size = 1");
-    }
-
     fn ensure_board_occupancy(&mut self, cycle: u32) {
         let size = (self.conf.width * self.conf.height) as usize;
         assert_eq!(self.occupancy.len() % size, 0);
@@ -802,6 +792,33 @@ impl Board {
                 self.occupancy[index] = o;
             }
         }
+    }
+
+    // Returns the end cycle of the last operation.
+    pub fn get_last_end_cycle(&self) -> u32 {
+        let mut cycle = self
+            .cycle_after_last_operation_at
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let size = (self.conf.width * self.conf.height) as usize;
+        let mut last_end_cycle = cycle;
+
+        while cycle < (self.occupancy.len() / size) as u32 {
+            for x in 0..self.conf.width {
+                for y in 0..self.conf.height {
+                    let occupancy = self.get_occupancy(x, y, cycle);
+                    use BoardOccupancy::*;
+                    if occupancy != Vacant && occupancy != IdleDataQubit {
+                        last_end_cycle = cycle + 1;
+                    }
+                }
+            }
+
+            cycle += 1;
+        }
+        last_end_cycle
     }
 
     fn get_occupancy(&self, x: u32, y: u32, cycle: u32) -> BoardOccupancy {
@@ -1011,6 +1028,40 @@ mod tests {
             assert_eq!(board.get_occupancy(2, 2, cycle), IdleDataQubit);
             assert_eq!(board.get_occupancy(2, 3, cycle), Vacant);
         }
+    }
+
+    #[test]
+    fn test_get_last_end_cycle() {
+        let mut mapping = DataQubitMapping::new(3, 4);
+        let q6 = Qubit::new(6);
+        let q7 = Qubit::new(7);
+        mapping.map(q6, 0, 0);
+        mapping.map(q7, 2, 2);
+        let mut board = new_board(mapping, 5);
+        let id = board.issue_operation_id();
+
+        assert_eq!(board.get_last_end_cycle(), 0);
+
+        board.set_cycle_after_last_operation_at(q6, 4);
+        board.set_cycle_after_last_operation_at(q7, 2);
+
+        assert_eq!(board.get_last_end_cycle(), 4);
+
+        board.ensure_board_occupancy(12);
+
+        assert_eq!(board.get_last_end_cycle(), 4);
+
+        board.set_occupancy(0, 1, 3, BoardOccupancy::LatticeSurgery(id));
+
+        assert_eq!(board.get_last_end_cycle(), 4);
+
+        board.set_occupancy(0, 2, 4, BoardOccupancy::LatticeSurgery(id));
+
+        assert_eq!(board.get_last_end_cycle(), 5);
+
+        board.set_occupancy(0, 2, 10, BoardOccupancy::LatticeSurgery(id));
+
+        assert_eq!(board.get_last_end_cycle(), 11);
     }
 
     #[test]

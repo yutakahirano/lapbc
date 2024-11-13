@@ -6,7 +6,6 @@ extern crate qasm;
 
 use board::Configuration;
 use clap::Parser;
-use lapbc::lapbc_compact_translation;
 use lapbc::LapbcCompactOperator;
 use pbc::Operator;
 use std::env;
@@ -762,7 +761,7 @@ fn main() {
         }
     }
 
-    println!("num cycles = {}", board.cycle());
+    println!("num cycles = {}", board.get_last_end_cycle());
 
     let spc_ops = pbc::spc_translation(&ops);
     println!(
