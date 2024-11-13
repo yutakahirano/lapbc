@@ -193,6 +193,7 @@ pub enum Operator {
 }
 
 impl Operator {
+    #[allow(dead_code)]
     pub fn is_non_clifford_rotation_or_measurement(&self) -> bool {
         match self {
             Operator::PauliRotation(r) => !r.is_clifford(),
@@ -200,6 +201,7 @@ impl Operator {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_single_qubit_clifford(&self) -> bool {
         match self {
             Operator::PauliRotation(r) => r.is_clifford() && self.has_single_qubit_support(),
@@ -207,6 +209,7 @@ impl Operator {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_multi_qubit_clifford(&self) -> bool {
         match self {
             Operator::PauliRotation(r) => r.is_clifford() && self.has_multi_qubit_support(),
@@ -214,6 +217,7 @@ impl Operator {
         }
     }
 
+    #[allow(dead_code)]
     pub fn axis(&self) -> &Axis {
         match self {
             Operator::PauliRotation(r) => &r.axis,
@@ -221,13 +225,16 @@ impl Operator {
         }
     }
 
+    #[allow(dead_code)]
     pub fn has_single_qubit_support(&self) -> bool {
         self.axis().iter().filter(|p| **p != Pauli::I).count() == 1
     }
+    #[allow(dead_code)]
     pub fn has_multi_qubit_support(&self) -> bool {
         self.axis().iter().filter(|p| **p != Pauli::I).count() > 1
     }
 
+    #[allow(dead_code)]
     pub fn commutes_with(&self, other: &Operator) -> bool {
         self.axis().commutes_with(other.axis())
     }

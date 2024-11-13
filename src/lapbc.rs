@@ -250,6 +250,7 @@ impl LapbcCompactOperator {
     }
 }
 
+#[allow(dead_code)]
 pub fn lapbc_compact_translation(ops: &Vec<Operator>) -> Vec<LapbcCompactOperator> {
     let mut ops = lapbc_translation(ops);
     if ops.is_empty() {

@@ -439,6 +439,7 @@ fn print_line_potentially_with_colors(line: &str) {
     }
 }
 
+#[allow(dead_code)]
 fn extract_and_print(nodes: &[qasm::AstNode]) -> Option<(Vec<PauliRotation>, Registers)> {
     use qasm::AstNode;
     let mut registers = Registers::new();

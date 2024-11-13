@@ -128,6 +128,7 @@ impl DataQubitMapping {
         self.mapping.iter().any(|(x1, y1, _)| *x1 == x && *y1 == y)
     }
 
+    #[cfg(test)]
     pub fn get(&self, qubit: Qubit) -> Option<(u32, u32)> {
         self.mapping
             .iter()
@@ -147,7 +148,6 @@ impl DataQubitMapping {
     pub fn iter(&self) -> impl Iterator<Item = &(u32, u32, Qubit)> {
         self.mapping.iter()
     }
-
 }
 
 #[cfg(test)]
