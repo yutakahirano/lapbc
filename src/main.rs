@@ -658,7 +658,7 @@ fn main() {
         }
     };
 
-    let (ops, _) = match extract(&ast) {
+    let (ops, registers) = match extract(&ast) {
         Some((ops, registers)) => (ops, registers),
         None => {
             eprintln!("Error in extracting the AST");
@@ -686,6 +686,17 @@ fn main() {
     }
 
     let mapping = mapping::DataQubitMapping::new_from_json(&mapping_source).unwrap();
+    let num_qubits_in_registers = registers.qregs.iter().map(|(_, size)| *size).sum::<u32>();
+    let qubit_ids_in_mapping = mapping
+        .iter()
+        .map(|(_, _, qubit)| qubit.qubit as u32)
+        .collect::<Vec<_>>();
+
+    if (0..num_qubits_in_registers).any(|qubit_id| !qubit_ids_in_mapping.contains(&qubit_id)) {
+        eprintln!("Error: qubit IDs in the mapping file are out of range");
+        return;
+    }
+
     let conf = Configuration {
         width: mapping.width,
         height: mapping.height,
