@@ -730,13 +730,13 @@ impl Board {
         let y_measurement_cost = y_measurement_cost(distance);
         let correction_range = cycle + distance..cycle + distance + y_measurement_cost;
 
-        let correction_position = distillation_area
-            .iter()
-            .find(|&&(x, y)| self.is_vacant(x, y, correction_range.clone()));
-        let correction_position = match correction_position {
-            Some(q) => q,
-            None => return false,
-        };
+        // `(cx, cy)` is the closet to the target data qubit in `distillation_area`. We can move a
+        // magic state distilled at any position in `distillation_area` to `(cx, cy)` by using
+        // lattice surgery, so as to perform a potential correction Y measurement there.
+        let (cx, cy) = distillation_area[0];
+        if !self.is_vacant(cx, cy, correction_range.clone()) {
+            return false;
+        }
 
         let id = self.issue_operation_id();
 
@@ -764,8 +764,7 @@ impl Board {
         }
 
         for c in correction_range {
-            let &(x, y) = correction_position;
-            self.set_occupancy(x, y, c, BoardOccupancy::YMeasurement);
+            self.set_occupancy(cx, cy, c, BoardOccupancy::YMeasurement);
         }
 
         true
