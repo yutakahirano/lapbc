@@ -4,10 +4,13 @@ extern crate clap;
 // extern crate oq3_source_file;
 extern crate qasm;
 
+use board::BoardOccupancy;
 use board::Configuration;
 use clap::Parser;
 use lapbc::LapbcCompactOperator;
 use pbc::Operator;
+use serde::ser::SerializeStruct;
+use std::collections::HashMap;
 use std::env;
 use std::fmt::Write;
 use std::io::IsTerminal;
@@ -27,6 +30,9 @@ struct Args {
 
     #[arg(short, long)]
     mapping_filename: String,
+
+    #[arg(short, long)]
+    schedule_output_filename: Option<String>,
 }
 
 use pbc::Angle;
@@ -792,6 +798,45 @@ fn main() {
     }
     println!("delay = {:.2}", average_delay);
 
+    if let Some(schedule_output_filename) = args.schedule_output_filename {
+        #[derive(serde::Serialize)]
+        struct ScheduleEntry {
+            x: u32,
+            y: u32,
+            occupancy: BoardOccupancy,
+        }
+
+        #[derive(serde::Serialize)]
+        struct Schedule {
+            schedule: Vec<Vec<ScheduleEntry>>,
+            width: u32,
+            height: u32,
+        }
+
+        let end_cycle = board.get_last_end_cycle();
+        let width = board.width();
+        let height = board.height();
+        let schedule = (0..end_cycle)
+            .map(|cycle| {
+                let mut schedule_on_this_cycle = vec![];
+                for y in 0..height {
+                    for x in 0..width {
+                        let occupancy = board.get_occupancy(x, y, cycle);
+                        schedule_on_this_cycle.push(ScheduleEntry { x, y, occupancy });
+                    }
+                }
+                schedule_on_this_cycle
+            })
+            .collect::<Vec<_>>();
+
+        let schedule = Schedule {
+            schedule,
+            width,
+            height,
+        };
+        let serialized = serde_json::to_string(&schedule).unwrap();
+        std::fs::write(schedule_output_filename, serialized).unwrap();
+    }
 }
 
 // tests

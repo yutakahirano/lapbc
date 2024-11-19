@@ -2,6 +2,8 @@ use std::collections::{HashSet, VecDeque};
 use std::ops::{Index, IndexMut};
 use std::{collections::HashMap, ops::Range};
 
+use serde::ser::SerializeStruct;
+
 use crate::mapping::{DataQubitMapping, Qubit};
 use crate::pbc::{Angle, Operator, Pauli, PauliRotation};
 
@@ -23,6 +25,54 @@ pub enum BoardOccupancy {
         num_distillations: u32,
         num_distillations_on_retry: u32,
     },
+}
+
+impl serde::Serialize for BoardOccupancy {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use BoardOccupancy::*;
+
+        let mut map = HashMap::<&str, String>::new();
+        match self {
+            Vacant => {
+                map.insert("type", "VACANT".to_string());
+            }
+            LatticeSurgery(id) => {
+                map.insert("type", "LATTICE_SURGERY".to_string());
+                map.insert("operation_id", id.id.to_string());
+            }
+            IdleDataQubit => {
+                map.insert("type", "IDLE_DATA_QUBIT".to_string());
+            }
+            DataQubitInOperation(id) => {
+                map.insert("type", "DATA_QUBIT_IN_OPERATION".to_string());
+                map.insert("operation_id", id.id.to_string());
+            }
+            YInitialization => {
+                map.insert("type", "Y_INITIALIZATION".to_string());
+            }
+            YMeasurement => {
+                map.insert("type", "Y_MEASUREMENT".to_string());
+            }
+            MagicStateDistillation {
+                id,
+                num_distillations,
+                num_distillations_on_retry,
+            } => {
+                map.insert("type", "MAGIC_STATE_DISTILLATION".to_string());
+                map.insert("operation_id", id.id.to_string());
+                map.insert("num_distillations", num_distillations.to_string());
+                map.insert("num_distillations_on_retry", num_distillations_on_retry.to_string());
+            }
+        }
+        let mut state = serializer.serialize_struct("ScheduleEntry", map.len())?;
+        for (k, v) in map {
+            state.serialize_field(k, &v)?;
+        }
+        state.end()
+    }
 }
 
 pub struct Board {
