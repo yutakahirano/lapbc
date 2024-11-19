@@ -63,6 +63,9 @@ class DataQubitInOperation:
 
 
 class YInitialization:
+    def __init__(self, id: int):
+        self.id = id
+
     def __str__(self) -> str:
         return 'YInitialization'
 
@@ -75,6 +78,9 @@ class YInitialization:
 
 
 class YMeasurement:
+    def __init__(self, id: int):
+        self.id = id
+
     def __str__(self) -> str:
         return 'YMeasurement'
 
@@ -157,10 +163,10 @@ def load_schedule(path: str) -> Schedule:
                     occupancy = IdleDataQubit()
                 case {'type': 'DATA_QUBIT_IN_OPERATION', 'operation_id': operation_id}:
                     occupancy = DataQubitInOperation(int(operation_id))
-                case {'type': 'Y_INITIALIZATION'}:
-                    occupancy = YInitialization()
-                case {'type': 'Y_MEASUREMENT'}:
-                    occupancy = YMeasurement()
+                case {'type': 'Y_INITIALIZATION', 'operation_id': operation_id}:
+                    occupancy = YInitialization(int(operation_id))
+                case {'type': 'Y_MEASUREMENT', 'operation_id': operation_id}:
+                    occupancy = YMeasurement(int(operation_id))
                 case {'type': 'MAGIC_STATE_DISTILLATION', 'operation_id': operation_id,
                       'num_distillations': num_distillations, 'num_distillations_on_retry': num_distillations_on_retry}:
                     occupancy = MagicStateDistillation(int(operation_id),
@@ -241,7 +247,8 @@ def visualize(schedule: Schedule, path_pattern: str, cycle_range: Iterable[int] 
             x = entry.x
             y = entry.y
             if isinstance(occupancy, LatticeSurgery) or isinstance(occupancy, DataQubitInOperation) or \
-               isinstance(occupancy, MagicStateDistillation):
+               isinstance(occupancy, MagicStateDistillation) or isinstance(occupancy, YInitialization) or \
+               isinstance(occupancy, YMeasurement):
                 operation_id = occupancy.id
                 text_operation_id = '{:02x}'.format(operation_id & 0xff)
                 ax.text(y, x, text_operation_id, ha='center', va='center')
@@ -257,7 +264,6 @@ def visualize(schedule: Schedule, path_pattern: str, cycle_range: Iterable[int] 
 def generate_animation(schedule: Schedule, path: str, cycle_range: Iterable[int] | None = None):
     if cycle_range is None:
         cycle_range = range(len(schedule.schedule))
-    
 
     norm, cmap = create_normalizer_and_color_map()
     fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(5, 5))
@@ -276,7 +282,8 @@ def generate_animation(schedule: Schedule, path: str, cycle_range: Iterable[int]
             x = entry.x
             y = entry.y
             if isinstance(occupancy, LatticeSurgery) or isinstance(occupancy, DataQubitInOperation) or \
-               isinstance(occupancy, MagicStateDistillation):
+               isinstance(occupancy, MagicStateDistillation) or isinstance(occupancy, YInitialization) or \
+               isinstance(occupancy, YMeasurement):
                 operation_id = occupancy.id
                 text_operation_id = '{:02x}'.format(operation_id & 0xff)
                 ax.text(y, x, text_operation_id, ha='center', va='center')

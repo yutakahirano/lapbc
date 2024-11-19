@@ -9,8 +9,6 @@ use board::Configuration;
 use clap::Parser;
 use lapbc::LapbcCompactOperator;
 use pbc::Operator;
-use serde::ser::SerializeStruct;
-use std::collections::HashMap;
 use std::env;
 use std::fmt::Write;
 use std::io::IsTerminal;

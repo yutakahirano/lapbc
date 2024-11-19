@@ -18,8 +18,8 @@ pub enum BoardOccupancy {
     LatticeSurgery(OperationId),
     IdleDataQubit,
     DataQubitInOperation(OperationId),
-    YInitialization,
-    YMeasurement,
+    YInitialization(OperationId),
+    YMeasurement(OperationId),
     MagicStateDistillation {
         id: OperationId,
         num_distillations: u32,
@@ -50,11 +50,13 @@ impl serde::Serialize for BoardOccupancy {
                 map.insert("type", "DATA_QUBIT_IN_OPERATION".to_string());
                 map.insert("operation_id", id.id.to_string());
             }
-            YInitialization => {
+            YInitialization(id) => {
                 map.insert("type", "Y_INITIALIZATION".to_string());
+                map.insert("operation_id", id.id.to_string());
             }
-            YMeasurement => {
+            YMeasurement(id) => {
                 map.insert("type", "Y_MEASUREMENT".to_string());
+                map.insert("operation_id", id.id.to_string());
             }
             MagicStateDistillation {
                 id,
@@ -364,7 +366,7 @@ impl Board {
             for &(x, y) in ancilla_candidates {
                 if self.is_vacant(x, y, cycle - y_initialization_cost..cycle + distance) {
                     for c in cycle - y_initialization_cost..cycle {
-                        self.set_occupancy(x, y, c, BoardOccupancy::YInitialization);
+                        self.set_occupancy(x, y, c, BoardOccupancy::YInitialization(id));
                     }
                     for c in cycle..cycle + distance {
                         self.set_occupancy(x, y, c, BoardOccupancy::LatticeSurgery(id));
@@ -385,7 +387,7 @@ impl Board {
                         self.set_occupancy(x, y, c, BoardOccupancy::LatticeSurgery(id));
                     }
                     for c in cycle + distance..cycle + distance + y_measurement_cost(distance) {
-                        self.set_occupancy(x, y, c, BoardOccupancy::YMeasurement);
+                        self.set_occupancy(x, y, c, BoardOccupancy::YMeasurement(id));
                     }
                     for (q, _, _) in targets {
                         self.set_cycle_after_last_operation_at(*q, cycle + distance);
@@ -836,7 +838,7 @@ impl Board {
         }
 
         for c in correction_range {
-            self.set_occupancy(cx, cy, c, BoardOccupancy::YMeasurement);
+            self.set_occupancy(cx, cy, c, BoardOccupancy::YMeasurement(id));
         }
 
         true
@@ -1334,7 +1336,7 @@ mod tests {
         assert!(board.is_occupancy(1, 0, 0..1, Vacant));
         assert!(board.is_occupancy(1, 0, 1..2, LatticeSurgery(OperationId { id: 1 })));
         assert!(board.is_occupancy(1, 0, 2..7, LatticeSurgery(id)));
-        assert!(board.is_occupancy(1, 0, 7..11, YMeasurement));
+        assert!(board.is_occupancy(1, 0, 7..11, YMeasurement(id)));
         assert!(board.is_occupancy(1, 0, 11..17, Vacant));
         assert!(board.is_occupancy(0, 1, 0..17, Vacant));
         assert!(board.is_occupancy(0, 2, 0..17, Vacant));
@@ -1397,7 +1399,7 @@ mod tests {
         assert!(board.is_occupancy(1, 1, 0..16, IdleDataQubit));
         assert!(board.is_occupancy(1, 2, 0..16, Vacant));
         assert!(board.is_occupancy(2, 0, 0..16, Vacant));
-        assert!(board.is_occupancy(2, 1, 0..6, YInitialization));
+        assert!(board.is_occupancy(2, 1, 0..6, YInitialization(id)));
         assert!(board.is_occupancy(2, 1, 6..9, LatticeSurgery(id)));
         assert!(board.is_occupancy(2, 1, 9..16, Vacant));
         assert!(board.is_occupancy(2, 2, 0..1, DataQubitInOperation(OperationId { id: 0 })));
@@ -1445,17 +1447,17 @@ mod tests {
         assert!(board.is_occupancy(0, 1, 0..3, DataQubitInOperation(OperationId { id: 1 })));
         assert!(board.is_occupancy(0, 1, 3..10, IdleDataQubit));
         assert!(board.is_occupancy(0, 2, 0..3, LatticeSurgery(OperationId { id: 1 })));
-        assert!(board.is_occupancy(0, 2, 3..6, YMeasurement));
+        assert!(board.is_occupancy(0, 2, 3..6, YMeasurement(id)));
         assert!(board.is_occupancy(0, 2, 6..10, Vacant));
         assert!(board.is_occupancy(1, 0, 0..3, LatticeSurgery(OperationId { id: 2 })));
-        assert!(board.is_occupancy(1, 0, 3..6, YMeasurement));
+        assert!(board.is_occupancy(1, 0, 3..6, YMeasurement(id)));
         assert!(board.is_occupancy(1, 0, 6..10, Vacant));
         assert!(board.is_occupancy(1, 1, 0..3, DataQubitInOperation(OperationId { id: 2 })));
         assert!(board.is_occupancy(1, 1, 3..10, IdleDataQubit));
         assert!(board.is_occupancy(1, 2, 0..1, LatticeSurgery(OperationId { id: 0 })));
         assert!(board.is_occupancy(1, 2, 1..10, Vacant));
         assert!(board.is_occupancy(2, 0, 0..3, LatticeSurgery(OperationId { id: 3 })));
-        assert!(board.is_occupancy(2, 0, 3..6, YMeasurement));
+        assert!(board.is_occupancy(2, 0, 3..6, YMeasurement(id)));
         assert!(board.is_occupancy(2, 0, 6..10, Vacant));
         assert!(board.is_occupancy(2, 1, 0..3, DataQubitInOperation(OperationId { id: 3 })));
         assert!(board.is_occupancy(2, 1, 3..10, IdleDataQubit));
@@ -1502,10 +1504,10 @@ mod tests {
         assert!(board.is_occupancy(0, 0, 0..1, LatticeSurgery(OperationId { id: 0 })));
         assert!(board.is_occupancy(0, 0, 1..10, Vacant));
         assert!(board.is_occupancy(0, 1, 0..3, LatticeSurgery(OperationId { id: 3 })));
-        assert!(board.is_occupancy(0, 1, 3..6, YMeasurement));
+        assert!(board.is_occupancy(0, 1, 3..6, YMeasurement(id)));
         assert!(board.is_occupancy(0, 1, 6..10, Vacant));
         assert!(board.is_occupancy(0, 2, 0..3, LatticeSurgery(OperationId { id: 4 })));
-        assert!(board.is_occupancy(0, 2, 3..6, YMeasurement));
+        assert!(board.is_occupancy(0, 2, 3..6, YMeasurement(id)));
         assert!(board.is_occupancy(0, 2, 6..10, Vacant));
         assert!(board.is_occupancy(1, 0, 0..3, DataQubitInOperation(OperationId { id: 2 })));
         assert!(board.is_occupancy(1, 0, 3..10, IdleDataQubit));
@@ -1514,7 +1516,7 @@ mod tests {
         assert!(board.is_occupancy(1, 2, 0..3, DataQubitInOperation(OperationId { id: 4 })));
         assert!(board.is_occupancy(1, 2, 3..10, IdleDataQubit));
         assert!(board.is_occupancy(2, 0, 0..3, LatticeSurgery(OperationId { id: 2 })));
-        assert!(board.is_occupancy(2, 0, 3..6, YMeasurement));
+        assert!(board.is_occupancy(2, 0, 3..6, YMeasurement(id)));
         assert!(board.is_occupancy(2, 0, 6..10, Vacant));
         assert!(board.is_occupancy(2, 1, 0..1, LatticeSurgery(OperationId { id: 1 })));
         assert!(board.is_occupancy(2, 1, 1..10, Vacant));
@@ -1796,14 +1798,15 @@ mod tests {
         use BoardOccupancy::*;
         let width = 2_u32;
         let height = 4_u32;
+        let dummy_id = OperationId { id: 9999 };
         let mut mapping = DataQubitMapping::new(width, height);
         mapping.map(Qubit::new(0), 0, 0);
         mapping.map(Qubit::new(1), 1, 3);
         let mut board = new_board(mapping, 3);
         board.ensure_board_occupancy(11);
-        board.set_occupancy(1, 1, 3, YMeasurement);
-        board.set_occupancy(1, 2, 4, YMeasurement);
-        board.set_occupancy(1, 1, 11, YInitialization);
+        board.set_occupancy(1, 1, 3, YMeasurement(dummy_id));
+        board.set_occupancy(1, 2, 4, YMeasurement(dummy_id));
+        board.set_occupancy(1, 1, 11, YInitialization(dummy_id));
         let id = OperationId { id: 0 };
 
         board.cycle = 8;
@@ -1814,15 +1817,15 @@ mod tests {
 
         assert!(board.is_occupancy(0, 0, 0..8, IdleDataQubit));
         assert!(board.is_occupancy(0, 1, 0..2, Vacant));
-        assert!(board.is_occupancy(0, 1, 2..8, YInitialization));
+        assert!(board.is_occupancy(0, 1, 2..8, YInitialization(id)));
         assert!(board.is_occupancy(0, 2, 0..8, Vacant));
         assert!(board.is_occupancy(0, 3, 0..8, Vacant));
         assert!(board.is_occupancy(1, 0, 0..8, Vacant));
         assert!(board.is_occupancy(1, 1, 0..3, Vacant));
-        assert!(board.is_occupancy(1, 1, 3..4, YMeasurement));
+        assert!(board.is_occupancy(1, 1, 3..4, YMeasurement(dummy_id)));
         assert!(board.is_occupancy(1, 1, 4..8, Vacant));
         assert!(board.is_occupancy(1, 2, 0..4, Vacant));
-        assert!(board.is_occupancy(1, 2, 4..5, YMeasurement));
+        assert!(board.is_occupancy(1, 2, 4..5, YMeasurement(dummy_id)));
         assert!(board.is_occupancy(1, 2, 5..8, Vacant));
         assert!(board.is_occupancy(1, 3, 0..8, IdleDataQubit));
 
@@ -1840,7 +1843,7 @@ mod tests {
         assert!(board.is_occupancy(0, 2, 11..12, Vacant));
         assert!(board.is_occupancy(0, 3, 11..12, Vacant));
         assert!(board.is_occupancy(1, 0, 11..12, Vacant));
-        assert!(board.is_occupancy(1, 1, 11..12, YInitialization));
+        assert!(board.is_occupancy(1, 1, 11..12, YInitialization(dummy_id)));
         assert!(board.is_occupancy(1, 2, 11..12, Vacant));
         assert!(board.is_occupancy(1, 3, 11..12, IdleDataQubit));
     }
@@ -1850,13 +1853,14 @@ mod tests {
         use BoardOccupancy::*;
         let width = 2_u32;
         let height = 4_u32;
+        let dummy_id = OperationId { id: 9999 };
         let mut mapping = DataQubitMapping::new(width, height);
         mapping.map(Qubit::new(0), 0, 0);
         mapping.map(Qubit::new(1), 1, 3);
         let mut board = new_board(mapping, 3);
         board.ensure_board_occupancy(4);
-        board.set_occupancy(1, 1, 3, YInitialization);
-        board.set_occupancy(1, 2, 4, YInitialization);
+        board.set_occupancy(1, 1, 3, YInitialization(dummy_id));
+        board.set_occupancy(1, 2, 4, YInitialization(dummy_id));
         let id = OperationId { id: 0 };
 
         assert!(board.schedule(&Operator::PauliRotation(PauliRotation {
@@ -1874,14 +1878,14 @@ mod tests {
         assert!(board.is_occupancy(1, 3, 0..3, DataQubitInOperation(id)));
 
         assert!(board.is_occupancy(0, 0, 3..6, IdleDataQubit));
-        assert!(board.is_occupancy(0, 1, 3..6, YMeasurement));
+        assert!(board.is_occupancy(0, 1, 3..6, YMeasurement(id)));
         assert!(board.is_occupancy(0, 2, 3..6, Vacant));
         assert!(board.is_occupancy(0, 3, 3..6, Vacant));
         assert!(board.is_occupancy(1, 0, 3..6, Vacant));
-        assert!(board.is_occupancy(1, 1, 3..4, YInitialization));
+        assert!(board.is_occupancy(1, 1, 3..4, YInitialization(dummy_id)));
         assert!(board.is_occupancy(1, 1, 4..6, Vacant));
         assert!(board.is_occupancy(1, 2, 3..4, Vacant));
-        assert!(board.is_occupancy(1, 2, 4..5, YInitialization));
+        assert!(board.is_occupancy(1, 2, 4..5, YInitialization(dummy_id)));
         assert!(board.is_occupancy(1, 2, 5..6, Vacant));
         assert!(board.is_occupancy(1, 3, 3..6, IdleDataQubit));
 
@@ -1938,7 +1942,7 @@ mod tests {
         assert!(board.is_occupancy(1, 1, 3..7, Vacant));
         assert!(board.is_occupancy(1, 2, 3..7, Vacant));
         assert!(board.is_occupancy(1, 3, 3..7, Vacant));
-        assert!(board.is_occupancy(2, 0, 3..6, YMeasurement));
+        assert!(board.is_occupancy(2, 0, 3..6, YMeasurement(id)));
         assert!(board.is_occupancy(2, 0, 6..7, Vacant));
         assert!(board.is_occupancy(2, 1, 3..7, Vacant));
         assert!(board.is_occupancy(2, 2, 3..7, Vacant));
@@ -1981,6 +1985,7 @@ mod tests {
         use BoardOccupancy::*;
         let width = 3_u32;
         let height = 4_u32;
+        let dummy_id = OperationId { id: 9999 };
         let mut mapping = DataQubitMapping::new(width, height);
         mapping.map(Qubit::new(0), 0, 1);
         mapping.map(Qubit::new(1), 0, 2);
@@ -1994,9 +1999,9 @@ mod tests {
         };
         let mut board = Board::new(mapping, &conf);
         board.ensure_board_occupancy(10);
-        board.set_occupancy(1, 1, 0, YMeasurement);
-        board.set_occupancy(0, 1, 0, YMeasurement);
-        board.set_occupancy(0, 3, 0, YInitialization);
+        board.set_occupancy(1, 1, 0, YMeasurement(dummy_id));
+        board.set_occupancy(0, 1, 0, YMeasurement(dummy_id));
+        board.set_occupancy(0, 3, 0, YInitialization(dummy_id));
         assert!(!board.schedule(&Operator::PauliRotation(PauliRotation {
             angle: Angle::PiOver8,
             axis: new_axis("XI")
@@ -2013,6 +2018,7 @@ mod tests {
         use BoardOccupancy::*;
         let width = 3_u32;
         let height = 4_u32;
+        let dummy_id = OperationId { id: 9999 };
         let mut mapping = DataQubitMapping::new(width, height);
         mapping.map(Qubit::new(0), 0, 0);
         let conf = Configuration {
@@ -2025,7 +2031,7 @@ mod tests {
         };
         let mut board = Board::new(mapping, &conf);
         board.ensure_board_occupancy(10);
-        board.set_occupancy(0, 1, 8, YMeasurement);
+        board.set_occupancy(0, 1, 8, YMeasurement(dummy_id));
 
         board.cycle = 5;
         assert!(!board.schedule_single_qubit_pi_over_8_rotation(Qubit::new(0), Pauli::Z, 1, 1));
@@ -2085,7 +2091,7 @@ mod tests {
 
         assert!(board.is_occupancy(0, 0, 0..15, distillation));
         assert!(board.is_occupancy(0, 0, 15..18, LatticeSurgery(id)));
-        assert!(board.is_occupancy(0, 0, 18..21, YMeasurement));
+        assert!(board.is_occupancy(0, 0, 18..21, YMeasurement(id)));
         assert!(board.is_occupancy(0, 1, 0..15, IdleDataQubit));
         assert!(board.is_occupancy(0, 1, 15..18, DataQubitInOperation(id)));
         assert!(board.is_occupancy(0, 1, 18..21, IdleDataQubit));
@@ -2165,7 +2171,7 @@ mod tests {
         assert!(board.is_occupancy(1, 0, 0..21, Vacant));
         assert!(board.is_occupancy(1, 1, 0..15, distillation));
         assert!(board.is_occupancy(1, 1, 15..18, LatticeSurgery(id)));
-        assert!(board.is_occupancy(1, 1, 18..21, YMeasurement));
+        assert!(board.is_occupancy(1, 1, 18..21, YMeasurement(id)));
         assert!(board.is_occupancy(1, 2, 0..21, Vacant));
         assert!(board.is_occupancy(1, 3, 0..21, Vacant));
         assert!(board.is_occupancy(2, 0, 0..21, Vacant));
@@ -2256,7 +2262,7 @@ mod tests {
         assert!(board.is_occupancy(2, 0, 0..16, Vacant));
         assert!(board.is_occupancy(2, 1, 0..10, distillation));
         assert!(board.is_occupancy(2, 1, 10..13, LatticeSurgery(id)));
-        assert!(board.is_occupancy(2, 1, 13..16, YMeasurement));
+        assert!(board.is_occupancy(2, 1, 13..16, YMeasurement(id)));
         assert!(board.is_occupancy(2, 2, 0..10, distillation));
         assert!(board.is_occupancy(2, 2, 10..13, LatticeSurgery(id)));
         assert!(board.is_occupancy(2, 2, 13..16, Vacant));
