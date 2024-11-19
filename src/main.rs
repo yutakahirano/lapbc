@@ -16,6 +16,7 @@ mod board;
 mod lapbc;
 mod mapping;
 mod pbc;
+mod runner;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -781,6 +782,16 @@ fn main() {
         spc_ops.len(),
         spc_ops.len() * conf.code_distance as usize
     );
+
+    let n = 50;
+    let mut average_delay = 0.0;
+    for _ in 0..n {
+        let runner = runner::Runner::new(&board);
+        let delay = runner.run();
+        average_delay += (delay as f64) / n as f64;
+    }
+    println!("delay = {:.2}", average_delay);
+
 }
 
 // tests

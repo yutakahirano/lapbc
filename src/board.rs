@@ -5,20 +5,24 @@ use std::{collections::HashMap, ops::Range};
 use crate::mapping::{DataQubitMapping, Qubit};
 use crate::pbc::{Angle, Operator, Pauli, PauliRotation};
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-struct OperationId {
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
+pub struct OperationId {
     id: u32,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum BoardOccupancy {
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
+pub enum BoardOccupancy {
     Vacant,
     LatticeSurgery(OperationId),
     IdleDataQubit,
     DataQubitInOperation(OperationId),
     YInitialization,
     YMeasurement,
-    MagicStateDistillation(OperationId),
+    MagicStateDistillation {
+        id: OperationId,
+        num_distillations: u32,
+        num_distillations_on_retry: u32,
+    },
 }
 
 pub struct Board {
@@ -46,7 +50,7 @@ pub struct Configuration {
     pub magic_state_distillation_success_rate: f64,
 }
 
-struct Map2D<T: Clone + Default> {
+pub struct Map2D<T: Clone> {
     width: u32,
     height: u32,
     map: Vec<T>,
@@ -95,6 +99,10 @@ impl Board {
 
     pub fn height(&self) -> u32 {
         self.conf.height
+    }
+
+    pub fn configuration(&self) -> &Configuration {
+        &self.conf
     }
 
     fn issue_operation_id(&mut self) -> OperationId {
@@ -748,14 +756,28 @@ impl Board {
                 self.set_occupancy(x, y, c, BoardOccupancy::LatticeSurgery(id));
             }
         }
+        let mut num_distillations = 0_u32;
         for &(x, y) in distillation_area {
+            let mut c = cycle;
+            while c >= distillation_cost && self.is_vacant(x, y, c - distillation_cost..c) {
+                c -= distillation_cost;
+                num_distillations += 1;
+            }
+        }
+        for &(x, y) in distillation_area {
+            let num_distillations_on_retry = distillation_area.len() as u32;
+            let occupancy = BoardOccupancy::MagicStateDistillation {
+                id,
+                num_distillations,
+                num_distillations_on_retry,
+            };
             let mut c = cycle;
             while c >= distillation_cost && self.is_vacant(x, y, c - distillation_cost..c) {
                 c -= distillation_cost;
             }
             let distillation_start = c;
             for c in distillation_start..cycle {
-                self.set_occupancy(x, y, c, BoardOccupancy::MagicStateDistillation(id));
+                self.set_occupancy(x, y, c, occupancy);
             }
 
             for c in cycle..cycle + distance {
@@ -820,12 +842,22 @@ impl Board {
         last_end_cycle
     }
 
-    fn get_occupancy(&self, x: u32, y: u32, cycle: u32) -> BoardOccupancy {
+    pub fn get_occupancy(&self, x: u32, y: u32, cycle: u32) -> BoardOccupancy {
         assert!(x < self.conf.width);
         assert!(y < self.conf.height);
         let size = (self.conf.width * self.conf.height) as usize;
         assert_eq!(self.occupancy.len() % size, 0);
-        assert!(cycle < (self.occupancy.len() / size) as u32);
+        if cycle >= (self.occupancy.len() / size) as u32 {
+            if self
+                .data_qubit_mapping
+                .values()
+                .any(|(cx, cy)| *cx == x && *cy == y)
+            {
+                return BoardOccupancy::IdleDataQubit;
+            } else {
+                return BoardOccupancy::Vacant;
+            }
+        }
 
         self.occupancy
             [(cycle * self.conf.width * self.conf.height + y * self.conf.width + x) as usize]
@@ -887,7 +919,17 @@ impl<T: Clone + Default> Map2D<T> {
     }
 }
 
-impl<T: Clone + Default> Index<(u32, u32)> for Map2D<T> {
+impl<T: Clone> Map2D<T> {
+    pub fn new_with_value(width: u32, height: u32, value: T) -> Self {
+        Map2D {
+            width,
+            height,
+            map: vec![value; (width * height) as usize],
+        }
+    }
+}
+
+impl<T: Clone> Index<(u32, u32)> for Map2D<T> {
     type Output = T;
 
     fn index(&self, index: (u32, u32)) -> &Self::Output {
@@ -898,7 +940,7 @@ impl<T: Clone + Default> Index<(u32, u32)> for Map2D<T> {
     }
 }
 
-impl<T: Clone + Default> IndexMut<(u32, u32)> for Map2D<T> {
+impl<T: Clone> IndexMut<(u32, u32)> for Map2D<T> {
     fn index_mut(&mut self, index: (u32, u32)) -> &mut Self::Output {
         let (x, y) = index;
         assert!(x < self.width);
@@ -1985,8 +2027,13 @@ mod tests {
         board.cycle = 15;
         assert!(board.schedule_single_qubit_pi_over_8_rotation(Qubit::new(0), Pauli::Z, 5, 2));
         let id = OperationId { id: 0 };
+        let distillation = MagicStateDistillation {
+            id,
+            num_distillations: 6,
+            num_distillations_on_retry: 2,
+        };
 
-        assert!(board.is_occupancy(0, 0, 0..15, MagicStateDistillation(id)));
+        assert!(board.is_occupancy(0, 0, 0..15, distillation));
         assert!(board.is_occupancy(0, 0, 15..18, LatticeSurgery(id)));
         assert!(board.is_occupancy(0, 0, 18..21, YMeasurement));
         assert!(board.is_occupancy(0, 1, 0..15, IdleDataQubit));
@@ -1994,7 +2041,7 @@ mod tests {
         assert!(board.is_occupancy(0, 1, 18..21, IdleDataQubit));
         assert!(board.is_occupancy(0, 2, 0..21, IdleDataQubit));
         assert!(board.is_occupancy(0, 3, 0..21, Vacant));
-        assert!(board.is_occupancy(1, 0, 0..15, MagicStateDistillation(id)));
+        assert!(board.is_occupancy(1, 0, 0..15, distillation));
         assert!(board.is_occupancy(1, 0, 15..18, LatticeSurgery(id)));
         assert!(board.is_occupancy(1, 0, 18..21, Vacant));
         assert!(board.is_occupancy(1, 1, 0..21, Vacant));
@@ -2053,6 +2100,11 @@ mod tests {
         assert!(board.schedule_single_qubit_pi_over_8_rotation(Qubit::new(0), Pauli::X, 5, 2));
 
         let id = OperationId { id: 0 };
+        let distillation = MagicStateDistillation {
+            id,
+            num_distillations: 6,
+            num_distillations_on_retry: 2,
+        };
 
         assert!(board.is_occupancy(0, 0, 0..21, Vacant));
         assert!(board.is_occupancy(0, 1, 0..15, IdleDataQubit));
@@ -2061,13 +2113,13 @@ mod tests {
         assert!(board.is_occupancy(0, 2, 0..21, IdleDataQubit));
         assert!(board.is_occupancy(0, 3, 0..21, Vacant));
         assert!(board.is_occupancy(1, 0, 0..21, Vacant));
-        assert!(board.is_occupancy(1, 1, 0..15, MagicStateDistillation(id)));
+        assert!(board.is_occupancy(1, 1, 0..15, distillation));
         assert!(board.is_occupancy(1, 1, 15..18, LatticeSurgery(id)));
         assert!(board.is_occupancy(1, 1, 18..21, YMeasurement));
         assert!(board.is_occupancy(1, 2, 0..21, Vacant));
         assert!(board.is_occupancy(1, 3, 0..21, Vacant));
         assert!(board.is_occupancy(2, 0, 0..21, Vacant));
-        assert!(board.is_occupancy(2, 1, 0..15, MagicStateDistillation(id)));
+        assert!(board.is_occupancy(2, 1, 0..15, distillation));
         assert!(board.is_occupancy(2, 1, 15..18, LatticeSurgery(id)));
         assert!(board.is_occupancy(2, 1, 18..21, Vacant));
         assert!(board.is_occupancy(2, 2, 0..21, Vacant));
@@ -2127,6 +2179,11 @@ mod tests {
         }));
 
         let id = OperationId { id: 0 };
+        let distillation = MagicStateDistillation {
+            id,
+            num_distillations: 6,
+            num_distillations_on_retry: 3,
+        };
 
         assert!(board.is_occupancy(0, 0, 0..10, Vacant));
         assert!(board.is_occupancy(0, 0, 10..13, LatticeSurgery(id)));
@@ -2142,15 +2199,15 @@ mod tests {
         assert!(board.is_occupancy(1, 1, 0..10, Vacant));
         assert!(board.is_occupancy(1, 1, 10..13, LatticeSurgery(id)));
         assert!(board.is_occupancy(1, 1, 13..16, Vacant));
-        assert!(board.is_occupancy(1, 2, 0..10, MagicStateDistillation(id)));
+        assert!(board.is_occupancy(1, 2, 0..10, distillation));
         assert!(board.is_occupancy(1, 2, 10..13, LatticeSurgery(id)));
         assert!(board.is_occupancy(1, 2, 13..16, Vacant));
         assert!(board.is_occupancy(1, 3, 0..16, Vacant));
         assert!(board.is_occupancy(2, 0, 0..16, Vacant));
-        assert!(board.is_occupancy(2, 1, 0..10, MagicStateDistillation(id)));
+        assert!(board.is_occupancy(2, 1, 0..10, distillation));
         assert!(board.is_occupancy(2, 1, 10..13, LatticeSurgery(id)));
         assert!(board.is_occupancy(2, 1, 13..16, YMeasurement));
-        assert!(board.is_occupancy(2, 2, 0..10, MagicStateDistillation(id)));
+        assert!(board.is_occupancy(2, 2, 0..10, distillation));
         assert!(board.is_occupancy(2, 2, 10..13, LatticeSurgery(id)));
         assert!(board.is_occupancy(2, 2, 13..16, Vacant));
         assert!(board.is_occupancy(2, 3, 0..16, Vacant));
