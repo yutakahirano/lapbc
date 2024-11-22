@@ -1,5 +1,5 @@
 // One-qubit Pauli operator.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 pub enum Pauli {
     I,
     X,
@@ -38,6 +38,21 @@ impl std::ops::Mul for Pauli {
 impl Pauli {
     pub fn commutes_with(&self, other: &Pauli) -> bool {
         *self == Pauli::I || *other == Pauli::I || self == other
+    }
+}
+
+impl std::fmt::Display for Pauli {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Pauli::I => 'I',
+                Pauli::X => 'X',
+                Pauli::Y => 'Y',
+                Pauli::Z => 'Z',
+            }
+        )
     }
 }
 

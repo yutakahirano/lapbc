@@ -83,14 +83,14 @@ impl Runner {
             let mut ending_distillations: HashSet<BoardOccupancy> = HashSet::new();
             for y in 0..height {
                 for x in 0..width {
-                    let occupancy = self.schedule[(x, y, scheduled_cycle)];
-                    let id = match occupancy {
+                    let occupancy = &self.schedule[(x, y, scheduled_cycle)];
+                    let id = match *occupancy {
                         BoardOccupancy::LatticeSurgery(id) => id,
                         BoardOccupancy::DataQubitInOperation(id) => id,
                         BoardOccupancy::MagicStateDistillation { .. } => {
                             // Here we assume that each distillation block ends at the same cycle.
-                            if occupancy != self.schedule[(x, y, scheduled_cycle + 1)] {
-                                ending_distillations.insert(occupancy);
+                            if *occupancy != self.schedule[(x, y, scheduled_cycle + 1)] {
+                                ending_distillations.insert(occupancy.clone());
                             }
                             continue;
                         }
@@ -103,8 +103,8 @@ impl Runner {
             }
             for y in 0..height {
                 for x in 0..width {
-                    let occupancy = self.schedule[(x, y, scheduled_cycle)];
-                    let id = match occupancy {
+                    let occupancy = &self.schedule[(x, y, scheduled_cycle)];
+                    let id = match *occupancy {
                         BoardOccupancy::LatticeSurgery(id) => id,
                         BoardOccupancy::DataQubitInOperation(id) => id,
                         _ => continue,
@@ -116,9 +116,9 @@ impl Runner {
             // Decrease the delay on qubits that are idle.
             for y in 0..height {
                 for x in 0..width {
-                    let occupancy = self.schedule[(x, y, scheduled_cycle)];
-                    if occupancy == BoardOccupancy::Vacant
-                        || occupancy == BoardOccupancy::IdleDataQubit
+                    let occupancy = &self.schedule[(x, y, scheduled_cycle)];
+                    if *occupancy == BoardOccupancy::Vacant
+                        || *occupancy == BoardOccupancy::IdleDataQubit
                     {
                         delay_map[(x, y)] = delay_map[(x, y)].saturating_sub(1);
                     }

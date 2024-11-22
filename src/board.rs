@@ -12,7 +12,7 @@ pub struct OperationId {
     id: u32,
 }
 
-#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub enum BoardOccupancy {
     Vacant,
     LatticeSurgery(OperationId),
@@ -24,6 +24,11 @@ pub enum BoardOccupancy {
         id: OperationId,
         num_distillations: u32,
         num_distillations_on_retry: u32,
+    },
+    PiOver8RotationBlock {
+        id: OperationId,
+        pi_over_8_axes: Vec<Pauli>,
+        pi_over_4_axes: Vec<Pauli>,
     },
 }
 
@@ -67,6 +72,30 @@ impl serde::Serialize for BoardOccupancy {
                 map.insert("operation_id", id.id.to_string());
                 map.insert("num_distillations", num_distillations.to_string());
                 map.insert("num_distillations_on_retry", num_distillations_on_retry.to_string());
+            }
+            PiOver8RotationBlock {
+                id,
+                pi_over_8_axes,
+                pi_over_4_axes,
+            } => {
+                map.insert("type", "PI_OVER_8_ROTATION_BLOCK".to_string());
+                map.insert("operation_id", id.id.to_string());
+                map.insert(
+                    "pi_over_8_axes",
+                    pi_over_8_axes
+                        .iter()
+                        .map(|a| a.to_string())
+                        .collect::<Vec<_>>()
+                        .join(""),
+                );
+                map.insert(
+                    "pi_over_4_axes",
+                    pi_over_4_axes
+                        .iter()
+                        .map(|a| a.to_string())
+                        .collect::<Vec<_>>()
+                        .join(""),
+                );
             }
         }
         let mut state = serializer.serialize_struct("ScheduleEntry", map.len())?;
@@ -409,9 +438,7 @@ impl Board {
             } else {
                 BoardOccupancy::LatticeSurgery(id)
             };
-            for c in cycle..cycle + distance {
-                self.set_occupancy(x, y, c, occupancy);
-            }
+            self.set_occupancy_range(x, y, cycle..cycle + distance, occupancy);
         }
 
         true
@@ -828,18 +855,292 @@ impl Board {
                 c -= distillation_cost;
             }
             let distillation_start = c;
-            for c in distillation_start..cycle {
-                self.set_occupancy(x, y, c, occupancy);
+            self.set_occupancy_range(x, y, distillation_start..cycle, occupancy);
+            self.set_occupancy_range(
+                x,
+                y,
+                cycle..cycle + distance,
+                BoardOccupancy::LatticeSurgery(id),
+            );
+        }
+
+        self.set_occupancy_range(cx, cy, correction_range, BoardOccupancy::YMeasurement(id));
+
+        true
+    }
+
+    fn schedule_single_qubit_pi_over_8_rotation_block(
+        &mut self,
+        qubit: Qubit,
+        pi_over_8_rotation_axes: &[Pauli],
+        pi_over_4_rotation_axes: &[Pauli],
+        distillation_area_size: u32,
+    ) -> bool {
+        let width = self.conf.width;
+        let height = self.conf.height;
+        assert!(distillation_area_size > 1);
+        let cycle = self.cycle;
+        let distance = self.conf.code_distance;
+        let expected_time_cost = self.expected_time_cost_for_single_qubit_pi_over_8_rotation_block(
+            pi_over_8_rotation_axes.len() as u32,
+            distillation_area_size,
+        );
+        self.ensure_board_occupancy(cycle + expected_time_cost + y_measurement_cost(distance));
+        if self.has_schedule_at_or_after(qubit, cycle) {
+            return false;
+        }
+        let block_cycle_range = cycle..cycle + expected_time_cost;
+        let (x, y) = self.data_qubit_mapping[&qubit];
+        let mut routing_qubits_candidates = vec![];
+        if x > 0 && y > 0 {
+            routing_qubits_candidates.push([(x - 1, y), (x, y - 1), (x - 1, y - 1)]);
+        }
+        if x > 0 && y + 1 < height {
+            routing_qubits_candidates.push([(x - 1, y), (x, y + 1), (x - 1, y + 1)]);
+        }
+        if x + 1 < width && y > 0 {
+            routing_qubits_candidates.push([(x + 1, y), (x, y - 1), (x + 1, y - 1)]);
+        }
+        if x + 1 < width && y + 1 < height {
+            routing_qubits_candidates.push([(x + 1, y), (x, y + 1), (x + 1, y + 1)]);
+        }
+
+        let mut q = routing_qubits_candidates
+            .iter()
+            .filter_map(|candidate| {
+                let is_vacant = |&(x, y)| self.is_vacant(x, y, block_cycle_range.clone());
+                if candidate.iter().all(is_vacant) {
+                    Some((candidate, Vec::<(u32, u32)>::new()))
+                } else {
+                    None
+                }
+            })
+            .collect::<VecDeque<_>>();
+
+        let mut result_candidates = Vec::new();
+        let mut visited = HashSet::new();
+        while let Some((routing_qubits, distillation_qubits)) = q.pop_front() {
+            if distillation_qubits.len() == distillation_area_size as usize {
+                let num_distillation_qubits_adjacent_to_routing_qubits = distillation_qubits
+                    .iter()
+                    .filter(|&&(x, y)| {
+                        let is_adjacent =
+                            |&(rx, ry): &(u32, u32)| rx.abs_diff(x) + ry.abs_diff(y) == 1;
+                        routing_qubits.iter().any(is_adjacent)
+                    })
+                    .count()
+                    as u32;
+
+                let mut q = VecDeque::new();
+                let mut visited = HashSet::new();
+                let mut max_distance = 0_u32;
+                for &(x, y) in routing_qubits {
+                    q.push_back((x, y, 0));
+                }
+                while let Some((x, y, d)) = q.pop_front() {
+                    if visited.contains(&(x, y)) {
+                        continue;
+                    }
+                    visited.insert((x, y));
+                    max_distance = std::cmp::max(max_distance, d);
+                    let mut push = |(x, y)| {
+                        if x >= width || y >= height {
+                            return;
+                        }
+                        if !distillation_qubits.contains(&(x, y)) {
+                            return;
+                        }
+                        q.push_back((x, y, d + 1));
+                    };
+
+                    if x > 0 {
+                        push((x - 1, y));
+                    }
+                    if y > 0 {
+                        push((x, y - 1));
+                    }
+                    push((x + 1, y));
+                    push((x, y + 1));
+                }
+
+                let entry = (
+                    routing_qubits,
+                    distillation_qubits,
+                    num_distillation_qubits_adjacent_to_routing_qubits,
+                    max_distance,
+                );
+
+                result_candidates.push(entry);
+                continue;
             }
 
-            for c in cycle..cycle + distance {
-                self.set_occupancy(x, y, c, BoardOccupancy::LatticeSurgery(id));
+            let mut next_candidates = vec![];
+            let mut push = |x, y| {
+                if x >= width || y >= height {
+                    return;
+                }
+                let mut existing = next_candidates
+                    .iter()
+                    .chain(routing_qubits.iter())
+                    .chain(distillation_qubits.iter());
+                if existing.any(|&(cx, cy)| cx == x && cy == y) {
+                    return;
+                }
+                if !self.is_vacant(x, y, block_cycle_range.clone()) {
+                    return;
+                }
+                next_candidates.push((x, y));
+            };
+
+            routing_qubits
+                .iter()
+                .chain(distillation_qubits.iter())
+                .for_each(|&(x, y)| {
+                    if x > 0 {
+                        push(x - 1, y);
+                    }
+                    if y > 0 {
+                        push(y - 1, y);
+                    }
+                    push(x + 1, y);
+                    push(x, y + 1);
+                });
+            for next in next_candidates {
+                let mut new_distillation_qubits = distillation_qubits.clone();
+                new_distillation_qubits.push(next);
+                // Sort the qubits to check the uniqueness.
+                new_distillation_qubits.sort();
+
+                let entry = (routing_qubits, new_distillation_qubits);
+                if visited.contains(&entry) {
+                    continue;
+                }
+                visited.insert(entry.clone());
+                q.push_back(entry);
             }
         }
 
-        for c in correction_range {
-            self.set_occupancy(cx, cy, c, BoardOccupancy::YMeasurement(id));
+        result_candidates.sort_by(
+            |(_, _, num_adjacent1, max_distance1), &(_, _, num_adjacent2, max_distance2)| {
+                num_adjacent1
+                    .cmp(&num_adjacent2)
+                    .reverse()
+                    .then(max_distance1.cmp(&max_distance2))
+            },
+        );
+
+        for (routing_qubits, distillation_qubits, _, _) in result_candidates {
+            if self.place_gates_for_single_qubit_pi_over_8_rotation_block(
+                x,
+                y,
+                pi_over_8_rotation_axes,
+                pi_over_4_rotation_axes,
+                routing_qubits,
+                &distillation_qubits,
+            ) {
+                self.set_cycle_after_last_operation_at(qubit, cycle + expected_time_cost);
+                return true;
+            }
         }
+        false
+    }
+
+    fn expected_time_cost_for_single_qubit_pi_over_8_rotation_block(
+        &self,
+        depth: u32,
+        num_distillation_blocks: u32,
+    ) -> u32 {
+        let distance = self.conf.code_distance;
+        let distillation_cost = self.conf.magic_state_distillation_cost;
+        let success_rate = self.conf.magic_state_distillation_success_rate;
+        let expected_distillation_cost =
+            distillation_cost as f64 / success_rate / num_distillation_blocks as f64;
+
+        let first_round_cost =
+            std::cmp::max((expected_distillation_cost * 1.5).ceil() as u32, distillation_cost)
+                + distance;
+        let one_round_cost =
+            std::cmp::max((expected_distillation_cost * 1.5).ceil() as u32, distance);
+
+        first_round_cost + one_round_cost * (depth - 1) + 2 * distance
+    }
+
+    fn translate<T: std::ops::Add<Output = T> + Copy>(r: Range<T>, x: T) -> Range<T> {
+        r.start + x..r.end + x
+    }
+
+    fn place_gates_for_single_qubit_pi_over_8_rotation_block(
+        &mut self,
+        x: u32,
+        y: u32,
+        pi_over_8_rotation_axes: &[Pauli],
+        pi_over_4_rotation_axes: &[Pauli],
+        routing_qubits: &[(u32, u32)],
+        distillation_qubits: &[(u32, u32)],
+    ) -> bool {
+        use BoardOccupancy::*;
+        let cycle = self.cycle;
+        let distance = self.conf.code_distance;
+        let expected_time_cost = self.expected_time_cost_for_single_qubit_pi_over_8_rotation_block(
+            pi_over_8_rotation_axes.len() as u32,
+            distillation_qubits.len() as u32,
+        );
+        // 2 * distance for the last two Clifford corrections (excluding Y measurements).
+        assert!(expected_time_cost > 2 * distance);
+        let block_time_cost: u32 = expected_time_cost - 2 * distance;
+        let block_cycle_range = cycle..cycle + block_time_cost;
+        let y_measurement_cost = y_measurement_cost(distance);
+        let second_last_correction_range = Self::translate(0..distance, cycle + block_time_cost);
+        let second_last_y_measurement_range =
+            Self::translate(0..y_measurement_cost, second_last_correction_range.end);
+        let last_correction_range =
+            Self::translate(0..distance, cycle + block_time_cost + distance);
+        let last_y_measurement_range =
+            Self::translate(0..y_measurement_cost, last_correction_range.end);
+
+        // We choose one qubit for the second-last Clifford correction from `distillation_qubits`,
+        // and one qubit for the last Clifford correction from `routing_qubits`. This implies that
+        // the last Clifford correction's axis cannot be Y. We can guarantee that at runtime.
+        // Although we can choose other qubits for correction qubits, we choose these qubits for
+        // simplicity.
+        let (cx1, cy1) = distillation_qubits[0];
+        let (cx2, cy2) = routing_qubits[0];
+
+        if !self.is_vacant(cx1, cy1, second_last_correction_range.clone()) {
+            return false;
+        }
+        if !self.is_vacant(cx2, cy2, last_correction_range.clone()) {
+            return false;
+        }
+
+        let id = self.issue_operation_id();
+        self.set_occupancy_range(x, y, cycle..last_correction_range.end, DataQubitInOperation(id));
+
+        let occupancy = PiOver8RotationBlock {
+            id,
+            pi_over_8_axes: pi_over_8_rotation_axes.to_vec(),
+            pi_over_4_axes: pi_over_4_rotation_axes.to_vec(),
+        };
+        for &(x, y) in routing_qubits.iter().chain(distillation_qubits) {
+            self.set_occupancy_range(x, y, block_cycle_range.clone(), occupancy.clone());
+        }
+
+        // The lattice surgery operation for the second-last Clifford correction.
+        let occupancy = LatticeSurgery(id);
+        for &(x, y) in routing_qubits.iter().chain(distillation_qubits) {
+            self.set_occupancy_range(x, y, second_last_correction_range.clone(), occupancy.clone());
+        }
+
+        // The Y measurement for the second-last Clifford correction.
+        self.set_occupancy_range(cx1, cy1, second_last_y_measurement_range, YMeasurement(id));
+
+        // The lattice surgery operation for the last Clifford correction.
+        for &(x, y) in routing_qubits {
+            self.set_occupancy_range(x, y, last_correction_range.clone(), occupancy.clone());
+        }
+
+        // The Y measurement for the last Clifford correction.
+        self.set_occupancy_range(cx2, cy2, last_y_measurement_range, YMeasurement(id));
 
         true
     }
@@ -911,8 +1212,8 @@ impl Board {
             }
         }
 
-        self.occupancy
-            [(cycle * self.conf.width * self.conf.height + y * self.conf.width + x) as usize]
+        let index = (cycle * self.conf.width * self.conf.height + y * self.conf.width + x) as usize;
+        self.occupancy[index].clone()
     }
 
     // Returns true if any operation is scheduled for `qubit` at or after `cycle`.
@@ -950,6 +1251,18 @@ impl Board {
         assert!(self.occupancy[index] == Vacant || self.occupancy[index] == IdleDataQubit);
 
         self.occupancy[index] = occupancy;
+    }
+
+    fn set_occupancy_range(
+        &mut self,
+        x: u32,
+        y: u32,
+        cycle_range: Range<u32>,
+        occupancy: BoardOccupancy,
+    ) {
+        for c in cycle_range {
+            self.set_occupancy(x, y, c, occupancy.clone());
+        }
     }
 
     fn set_cycle_after_last_operation_at(&mut self, qubit: Qubit, cycle: u32) {
@@ -1447,17 +1760,17 @@ mod tests {
         assert!(board.is_occupancy(0, 1, 0..3, DataQubitInOperation(OperationId { id: 1 })));
         assert!(board.is_occupancy(0, 1, 3..10, IdleDataQubit));
         assert!(board.is_occupancy(0, 2, 0..3, LatticeSurgery(OperationId { id: 1 })));
-        assert!(board.is_occupancy(0, 2, 3..6, YMeasurement(id)));
+        assert!(board.is_occupancy(0, 2, 3..6, YMeasurement(OperationId { id: 1 })));
         assert!(board.is_occupancy(0, 2, 6..10, Vacant));
         assert!(board.is_occupancy(1, 0, 0..3, LatticeSurgery(OperationId { id: 2 })));
-        assert!(board.is_occupancy(1, 0, 3..6, YMeasurement(id)));
+        assert!(board.is_occupancy(1, 0, 3..6, YMeasurement(OperationId { id: 2 })));
         assert!(board.is_occupancy(1, 0, 6..10, Vacant));
         assert!(board.is_occupancy(1, 1, 0..3, DataQubitInOperation(OperationId { id: 2 })));
         assert!(board.is_occupancy(1, 1, 3..10, IdleDataQubit));
         assert!(board.is_occupancy(1, 2, 0..1, LatticeSurgery(OperationId { id: 0 })));
         assert!(board.is_occupancy(1, 2, 1..10, Vacant));
         assert!(board.is_occupancy(2, 0, 0..3, LatticeSurgery(OperationId { id: 3 })));
-        assert!(board.is_occupancy(2, 0, 3..6, YMeasurement(id)));
+        assert!(board.is_occupancy(2, 0, 3..6, YMeasurement(OperationId { id: 3 })));
         assert!(board.is_occupancy(2, 0, 6..10, Vacant));
         assert!(board.is_occupancy(2, 1, 0..3, DataQubitInOperation(OperationId { id: 3 })));
         assert!(board.is_occupancy(2, 1, 3..10, IdleDataQubit));
@@ -1504,10 +1817,10 @@ mod tests {
         assert!(board.is_occupancy(0, 0, 0..1, LatticeSurgery(OperationId { id: 0 })));
         assert!(board.is_occupancy(0, 0, 1..10, Vacant));
         assert!(board.is_occupancy(0, 1, 0..3, LatticeSurgery(OperationId { id: 3 })));
-        assert!(board.is_occupancy(0, 1, 3..6, YMeasurement(id)));
+        assert!(board.is_occupancy(0, 1, 3..6, YMeasurement(OperationId { id: 3 })));
         assert!(board.is_occupancy(0, 1, 6..10, Vacant));
         assert!(board.is_occupancy(0, 2, 0..3, LatticeSurgery(OperationId { id: 4 })));
-        assert!(board.is_occupancy(0, 2, 3..6, YMeasurement(id)));
+        assert!(board.is_occupancy(0, 2, 3..6, YMeasurement(OperationId { id: 4 })));
         assert!(board.is_occupancy(0, 2, 6..10, Vacant));
         assert!(board.is_occupancy(1, 0, 0..3, DataQubitInOperation(OperationId { id: 2 })));
         assert!(board.is_occupancy(1, 0, 3..10, IdleDataQubit));
@@ -1516,7 +1829,7 @@ mod tests {
         assert!(board.is_occupancy(1, 2, 0..3, DataQubitInOperation(OperationId { id: 4 })));
         assert!(board.is_occupancy(1, 2, 3..10, IdleDataQubit));
         assert!(board.is_occupancy(2, 0, 0..3, LatticeSurgery(OperationId { id: 2 })));
-        assert!(board.is_occupancy(2, 0, 3..6, YMeasurement(id)));
+        assert!(board.is_occupancy(2, 0, 3..6, YMeasurement(OperationId { id: 2 })));
         assert!(board.is_occupancy(2, 0, 6..10, Vacant));
         assert!(board.is_occupancy(2, 1, 0..1, LatticeSurgery(OperationId { id: 1 })));
         assert!(board.is_occupancy(2, 1, 1..10, Vacant));
@@ -2089,7 +2402,7 @@ mod tests {
             num_distillations_on_retry: 2,
         };
 
-        assert!(board.is_occupancy(0, 0, 0..15, distillation));
+        assert!(board.is_occupancy(0, 0, 0..15, distillation.clone()));
         assert!(board.is_occupancy(0, 0, 15..18, LatticeSurgery(id)));
         assert!(board.is_occupancy(0, 0, 18..21, YMeasurement(id)));
         assert!(board.is_occupancy(0, 1, 0..15, IdleDataQubit));
@@ -2169,7 +2482,7 @@ mod tests {
         assert!(board.is_occupancy(0, 2, 0..21, IdleDataQubit));
         assert!(board.is_occupancy(0, 3, 0..21, Vacant));
         assert!(board.is_occupancy(1, 0, 0..21, Vacant));
-        assert!(board.is_occupancy(1, 1, 0..15, distillation));
+        assert!(board.is_occupancy(1, 1, 0..15, distillation.clone()));
         assert!(board.is_occupancy(1, 1, 15..18, LatticeSurgery(id)));
         assert!(board.is_occupancy(1, 1, 18..21, YMeasurement(id)));
         assert!(board.is_occupancy(1, 2, 0..21, Vacant));
@@ -2255,12 +2568,12 @@ mod tests {
         assert!(board.is_occupancy(1, 1, 0..10, Vacant));
         assert!(board.is_occupancy(1, 1, 10..13, LatticeSurgery(id)));
         assert!(board.is_occupancy(1, 1, 13..16, Vacant));
-        assert!(board.is_occupancy(1, 2, 0..10, distillation));
+        assert!(board.is_occupancy(1, 2, 0..10, distillation.clone()));
         assert!(board.is_occupancy(1, 2, 10..13, LatticeSurgery(id)));
         assert!(board.is_occupancy(1, 2, 13..16, Vacant));
         assert!(board.is_occupancy(1, 3, 0..16, Vacant));
         assert!(board.is_occupancy(2, 0, 0..16, Vacant));
-        assert!(board.is_occupancy(2, 1, 0..10, distillation));
+        assert!(board.is_occupancy(2, 1, 0..10, distillation.clone()));
         assert!(board.is_occupancy(2, 1, 10..13, LatticeSurgery(id)));
         assert!(board.is_occupancy(2, 1, 13..16, YMeasurement(id)));
         assert!(board.is_occupancy(2, 2, 0..10, distillation));
@@ -2270,5 +2583,160 @@ mod tests {
         assert!(board.has_schedule_at_or_after(Qubit::new(0), 12));
         assert!(!board.has_schedule_at_or_after(Qubit::new(0), 13));
         assert!(!board.has_schedule_at_or_after(Qubit::new(1), 0));
+    }
+
+    #[test]
+    fn test_schedule_pi_over_8_rotation_block_target_will_be_used() {
+        let width = 3_u32;
+        let height = 4_u32;
+
+        let mut mapping = DataQubitMapping::new(width, height);
+        mapping.map(Qubit::new(0), 0, 1);
+        let conf = Configuration {
+            width,
+            height,
+            code_distance: 3,
+            magic_state_distillation_cost: 5,
+            num_distillations_for_pi_over_8_rotation: 5,
+            magic_state_distillation_success_rate: 0.8,
+        };
+        let mut board = Board::new(mapping, &conf);
+
+        board.set_cycle_after_last_operation_at(Qubit::new(0), 1000);
+        assert!(!board.schedule_single_qubit_pi_over_8_rotation_block(
+            Qubit::new(0),
+            &[Pauli::X, Pauli::Y, Pauli::Z],
+            &[Pauli::X, Pauli::Y],
+            5
+        ));
+    }
+
+    #[test]
+    fn test_schedule_pi_over_8_rotation_block_routing_qubits_are_unavailable() {
+        let width = 3_u32;
+        let height = 4_u32;
+
+        let mut mapping = DataQubitMapping::new(width, height);
+        mapping.map(Qubit::new(0), 0, 1);
+        let conf = Configuration {
+            width,
+            height,
+            code_distance: 3,
+            magic_state_distillation_cost: 5,
+            num_distillations_for_pi_over_8_rotation: 5,
+            magic_state_distillation_success_rate: 0.8,
+        };
+        let mut board = Board::new(mapping, &conf);
+        let id = board.issue_operation_id();
+        board.ensure_board_occupancy(1);
+        board.set_occupancy(0, 0, 0, BoardOccupancy::LatticeSurgery(id));
+        board.set_occupancy(2, 0, 0, BoardOccupancy::LatticeSurgery(id));
+        board.set_occupancy(0, 2, 0, BoardOccupancy::LatticeSurgery(id));
+        board.set_occupancy(2, 2, 0, BoardOccupancy::LatticeSurgery(id));
+
+        assert!(!board.schedule_single_qubit_pi_over_8_rotation_block(
+            Qubit::new(0),
+            &[Pauli::X, Pauli::Z, Pauli::X],
+            &[Pauli::X, Pauli::Y],
+            5
+        ));
+    }
+
+    #[test]
+    fn test_schedule_pi_over_8_rotation_distillation_block_qubits_are_unavailable() {
+        let width = 2_u32;
+        let height = 4_u32;
+
+        let mut mapping = DataQubitMapping::new(width, height);
+        mapping.map(Qubit::new(0), 0, 0);
+        let conf = Configuration {
+            width,
+            height,
+            code_distance: 3,
+            magic_state_distillation_cost: 5,
+            num_distillations_for_pi_over_8_rotation: 5,
+            magic_state_distillation_success_rate: 0.8,
+        };
+        let mut board = Board::new(mapping, &conf);
+
+        assert!(!board.schedule_single_qubit_pi_over_8_rotation_block(
+            Qubit::new(0),
+            &[Pauli::X, Pauli::Z, Pauli::X],
+            &[Pauli::X, Pauli::Y],
+            5
+        ));
+    }
+
+    #[test]
+    fn test_schedule_pi_over_8_rotation_distillation_block() {
+        use BoardOccupancy::*;
+        let width = 3_u32;
+        let height = 4_u32;
+
+        let mut mapping = DataQubitMapping::new(width, height);
+        mapping.map(Qubit::new(0), 0, 0);
+        let conf = Configuration {
+            width,
+            height,
+            code_distance: 3,
+            magic_state_distillation_cost: 5,
+            num_distillations_for_pi_over_8_rotation: 5,
+            magic_state_distillation_success_rate: 0.2,
+        };
+        let mut board = Board::new(mapping, &conf);
+        let pi_over_8_axes = [Pauli::X, Pauli::Z, Pauli::X];
+        let pi_over_4_axes = [Pauli::X, Pauli::Y];
+
+        assert!(board.schedule_single_qubit_pi_over_8_rotation_block(
+            Qubit::new(0),
+            &pi_over_8_axes,
+            &pi_over_4_axes,
+            5
+        ));
+
+        let id = OperationId { id: 0 };
+        let block_occupancy = PiOver8RotationBlock {
+            id,
+            pi_over_8_axes: pi_over_8_axes.to_vec(),
+            pi_over_4_axes: pi_over_4_axes.to_vec(),
+        };
+
+        assert!(board.is_occupancy(0, 0, 0..33, DataQubitInOperation(id)));
+        assert!(board.is_occupancy(0, 0, 33..40, IdleDataQubit));
+        assert!(board.is_occupancy(1, 0, 0..27, block_occupancy.clone()));
+        assert!(board.is_occupancy(1, 0, 27..33, LatticeSurgery(id)));
+        assert!(board.is_occupancy(1, 0, 33..36, YMeasurement(id)));
+        assert!(board.is_occupancy(1, 0, 36..40, Vacant));
+        assert!(board.is_occupancy(2, 0, 0..27, block_occupancy.clone()));
+        assert!(board.is_occupancy(2, 0, 27..30, LatticeSurgery(id)));
+        assert!(board.is_occupancy(2, 0, 30..40, Vacant));
+
+        assert!(board.is_occupancy(0, 1, 0..27, block_occupancy.clone()));
+        assert!(board.is_occupancy(0, 1, 27..33, LatticeSurgery(id)));
+        assert!(board.is_occupancy(0, 1, 33..40, Vacant));
+        assert!(board.is_occupancy(1, 1, 0..27, block_occupancy.clone()));
+        assert!(board.is_occupancy(1, 1, 27..33, LatticeSurgery(id)));
+        assert!(board.is_occupancy(1, 1, 33..40, Vacant));
+        assert!(board.is_occupancy(2, 1, 0..27, block_occupancy.clone()));
+        assert!(board.is_occupancy(2, 1, 27..30, LatticeSurgery(id)));
+        assert!(board.is_occupancy(2, 1, 30..40, Vacant));
+
+        assert!(board.is_occupancy(0, 2, 0..27, block_occupancy.clone()));
+        assert!(board.is_occupancy(0, 2, 27..30, LatticeSurgery(id)));
+        assert!(board.is_occupancy(0, 2, 30..33, YMeasurement(id)));
+        assert!(board.is_occupancy(0, 2, 33..40, Vacant));
+        assert!(board.is_occupancy(1, 2, 0..27, block_occupancy.clone()));
+        assert!(board.is_occupancy(1, 2, 27..30, LatticeSurgery(id)));
+        assert!(board.is_occupancy(1, 2, 30..40, Vacant));
+        assert!(board.is_occupancy(2, 2, 0..40, Vacant));
+
+        assert!(board.is_occupancy(0, 3, 0..27, block_occupancy.clone()));
+        assert!(board.is_occupancy(0, 3, 27..30, LatticeSurgery(id)));
+        assert!(board.is_occupancy(0, 3, 30..33, Vacant));
+        assert!(board.is_occupancy(1, 3, 0..40, Vacant));
+        assert!(board.is_occupancy(2, 3, 0..40, Vacant));
+
+        assert!(board.has_schedule_at_or_after(Qubit::new(0), 32));
+        assert!(!board.has_schedule_at_or_after(Qubit::new(0), 33));
     }
 }
