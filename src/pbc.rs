@@ -1,5 +1,7 @@
+use serde::Serialize;
+
 // One-qubit Pauli operation.
-#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Serialize)]
 pub enum Pauli {
     I,
     X,

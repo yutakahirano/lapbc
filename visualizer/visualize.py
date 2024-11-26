@@ -1,11 +1,34 @@
+import enum
 import json
 import matplotlib
 import matplotlib.pyplot as plt
 import math
 import numpy as np
 
+from enum import Enum, auto
 from matplotlib.animation import FuncAnimation
 from typing import Iterable
+
+
+class Pauli(Enum):
+    IDENTITY = auto(),  # pycodestyle complains about 'I'.
+    X = auto(),
+    Y = auto(),
+    Z = auto()
+
+    @staticmethod
+    def from_string(name: str):
+        match name:
+            case 'I':
+                return Pauli.IDENTITY
+            case 'X':
+                return Pauli.X
+            case 'Y':
+                return Pauli.Y
+            case 'Z':
+                return Pauli.Z
+            case _:
+                raise ValueError(f'Unknown Pauli: {name}')
 
 
 class Vacant:
@@ -93,14 +116,12 @@ class YMeasurement:
 
 
 class MagicStateDistillation:
-    def __init__(self, id: int, num_distillations: int, num_distillations_on_retry: int):
+    def __init__(self, id: int):
         self.id = id
-        self.num_distillations = num_distillations
-        self.num_distillations_on_retry = num_distillations_on_retry
 
     def __str__(self) -> str:
-        format = 'MagicStateDistillation(id={}, num_distillations={}, num_distillation_on_retry={})'
-        return format.format(self.id, self.num_distillations, self.num_distillations_on_retry)
+        format = 'MagicStateDistillation(id={})'
+        return format.format(self.id)
 
     @staticmethod
     def class_id() -> int:
@@ -114,6 +135,33 @@ Occupancy = Vacant | LatticeSurgery | IdleDataQubit | DataQubitInOperation | \
             YInitialization | YMeasurement | MagicStateDistillation
 
 
+class PiOver4Rotation:
+    def __init__(self, id: int, targets: list[tuple[int, int, Pauli]]):
+        self.id = id
+        self.targets = targets
+
+
+class PiOver8Rotation:
+    def __init__(self, id: int, targets: list[tuple[int, int, Pauli]],
+                 num_distillations: int, num_distillations_on_retry: int):
+        self.id = id
+        self.targets = targets
+        self.num_distillations = num_distillations
+        self.num_distillations_on_retry = num_distillations_on_retry
+
+
+class SingleQubitPiOver8RotationBlock:
+    def __init__(self, id: int, target: tuple[int, int],
+                 pi_over_8_rotation_axes: list[Pauli], pi_over_4_rotation_axes: list[Pauli]):
+        self.id = id
+        self.target = target
+        self.pi_over_8_rotation_axes = pi_over_8_rotation_axes
+        self.pi_over_4_rotation_axes = pi_over_4_rotation_axes
+
+
+Operation = PiOver4Rotation | PiOver8Rotation | SingleQubitPiOver8RotationBlock
+
+
 class ScheduleEntry:
     def __init__(self, x: int, y: int, occupancy: Occupancy):
         self.x = x
@@ -125,9 +173,10 @@ class ScheduleEntry:
 
 
 class Schedule:
-    def __init__(self, width: int, height: int, schedule: list[list[ScheduleEntry]]):
+    def __init__(self, width: int, height: int, operations: dict[int,Operation], schedule: list[list[ScheduleEntry]]):
         self.width = width
         self.height = height
+        self.operations = operations
         self.schedule = schedule
 
 
@@ -139,10 +188,84 @@ def load_schedule(path: str) -> Schedule:
     width = int(data['width'])
     assert 'height' in data
     height = int(data['height'])
+    assert 'operations' in data
+    json_operations = data['operations']
+    assert isinstance(json_operations, list)
     assert 'schedule' in data
     json_schedule = data['schedule']
     assert isinstance(json_schedule, list)
     cycle = 0
+    operations: dict[int, Operation] = {}
+    for json_operation in json_operations:
+        assert isinstance(json_operation, dict)
+        assert 'id' in json_operation
+        operation_id = json_operation['id']
+        assert 'type' in json_operation
+        typename = json_operation['type']
+        assert 'id' in json_operation
+        operation_id = int(json_operation['id'])
+
+        match typename:
+            case 'PI_OVER_4_ROTATION':
+                assert 'targets' in json_operation
+                json_targets = json_operation['targets']
+                targets: list[tuple[int, int, Pauli]] = []
+                assert isinstance(json_targets, list)
+                for json_target in json_targets:
+                    assert isinstance(json_target, dict)
+                    assert 'x' in json_target
+                    x = int(json_target['x'])
+                    assert 'y' in json_target
+                    y = int(json_target['y'])
+                    assert 'axis' in json_target
+                    axis = Pauli.from_string(json_target['axis'])
+                    targets.append((x, y, axis))
+                operations[operation_id] = PiOver4Rotation(operation_id, targets)
+            case 'PI_OVER_8_ROTATION':
+                assert 'targets' in json_operation
+                json_targets = json_operation['targets']
+                targets = []
+                assert isinstance(json_targets, list)
+                for json_target in json_targets:
+                    assert isinstance(json_target, dict)
+                    assert 'x' in json_target
+                    x = int(json_target['x'])
+                    assert 'y' in json_target
+                    y = int(json_target['y'])
+                    assert 'axis' in json_target
+                    axis = Pauli.from_string(json_target['axis'])
+                    targets.append((x, y, axis))
+                assert 'num_distillations' in json_operation
+                num_distillations = int(json_operation['num_distillations'])
+                assert 'num_distillations_on_retry' in json_operation
+                num_distillations_on_retry = int(json_operation['num_distillations_on_retry'])
+                operations[operation_id] = PiOver8Rotation(
+                    operation_id, targets, num_distillations, num_distillations_on_retry)
+            case 'SINGLE_QUBIT_PI_OVER_8_ROTATION_BLOCK':
+                assert 'target' in json_operation
+                json_target = json_operation['target']
+                assert isinstance(json_target, dict)
+                assert 'x' in json_target
+                x = int(json_target['x'])
+                assert 'y' in json_target
+                y = int(json_target['y'])
+                assert 'pi_over_8_rotation_axes' in json_operation
+                json_pi_over_8_rotation_axes = json_operation['pi_over_8_rotation_axes']
+                pi_over_8_rotation_axes: list[Pauli] = []
+                assert isinstance(json_pi_over_8_rotation_axes, list)
+                for json_axis in json_pi_over_8_rotation_axes:
+                    pi_over_8_rotation_axes.append(Pauli.from_string(json_axis))
+                assert 'pi_over_4_rotation_axes' in json_operation
+                json_pi_over_4_rotation_axes = json_operation['pi_over_4_rotation_axes']
+                pi_over_4_rotation_axes: list[Pauli] = []
+                assert isinstance(json_pi_over_4_rotation_axes, list)
+                for json_axis in json_pi_over_4_rotation_axes:
+                    pi_over_4_rotation_axes.append(Pauli.from_string(json_axis))
+                operations[operation_id] = SingleQubitPiOver8RotationBlock(
+                    operation_id, (x, y), pi_over_8_rotation_axes, pi_over_4_rotation_axes)
+            case _:
+                raise ValueError(f'Unknown operation type: {typename}')
+
     entries: list[list[ScheduleEntry]] = []
     for json_schedule_at_cycle in json_schedule:
         entries_at_cycle: list[ScheduleEntry] = []
@@ -167,16 +290,14 @@ def load_schedule(path: str) -> Schedule:
                     occupancy = YInitialization(int(operation_id))
                 case {'type': 'Y_MEASUREMENT', 'operation_id': operation_id}:
                     occupancy = YMeasurement(int(operation_id))
-                case {'type': 'MAGIC_STATE_DISTILLATION', 'operation_id': operation_id,
-                      'num_distillations': num_distillations, 'num_distillations_on_retry': num_distillations_on_retry}:
-                    occupancy = MagicStateDistillation(int(operation_id),
-                                                       int(num_distillations), int(num_distillations_on_retry))
+                case {'type': 'MAGIC_STATE_DISTILLATION', 'operation_id': operation_id}:
+                    occupancy = MagicStateDistillation(int(operation_id))
             entry = ScheduleEntry(x, y, occupancy)
             entries_at_cycle.append(entry)
 
         entries.append(entries_at_cycle)
         cycle += 1
-    return Schedule(width, height, entries)
+    return Schedule(width, height, operations, entries)
 
 
 def create_normalizer_and_color_map() -> tuple[matplotlib.colors.Normalize, matplotlib.colors.LinearSegmentedColormap]:

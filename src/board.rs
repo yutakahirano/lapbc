@@ -2,7 +2,8 @@ use std::collections::{HashSet, VecDeque};
 use std::ops::{Index, IndexMut};
 use std::{collections::HashMap, ops::Range};
 
-use serde::ser::SerializeStruct;
+use serde::ser::{SerializeSeq, SerializeStruct};
+use serde::Serialize;
 
 use crate::mapping::{DataQubitMapping, Qubit};
 use crate::pbc::{Angle, Operation, Pauli, PauliRotation};
@@ -10,6 +11,136 @@ use crate::pbc::{Angle, Operation, Pauli, PauliRotation};
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 pub struct OperationId {
     id: u32,
+}
+
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Serialize)]
+pub struct Position {
+    x: u32,
+    y: u32,
+}
+
+struct Targets<'a> {
+    internal: &'a [(Position, Pauli)],
+}
+
+impl<'a> Targets<'a> {
+    fn new(targets: &'a [(Position, Pauli)]) -> Self {
+        Self { internal: targets }
+    }
+}
+
+impl<'a> serde::Serialize for Targets<'a> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let seq = self.internal;
+        let mut state = serializer.serialize_seq(Some(seq.len()))?;
+
+        #[derive(Serialize)]
+        struct Element {
+            x: u32,
+            y: u32,
+            axis: Pauli,
+        }
+
+        for (pos, pauli) in seq {
+            state.serialize_element(&Element {
+                x: pos.x,
+                y: pos.y,
+                axis: *pauli,
+            })?;
+        }
+
+        state.end()
+    }
+}
+
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+pub enum OperationWithAdditionalData {
+    PiOver4Rotation {
+        id: OperationId,
+        targets: Vec<(Position, Pauli)>,
+    },
+    PiOver8Rotation {
+        id: OperationId,
+        targets: Vec<(Position, Pauli)>,
+        num_distillations: u32,
+        num_distillations_on_retry: u32,
+    },
+    SingleQubitPiOver8RotationBlock {
+        id: OperationId,
+        target: Position,
+        pi_over_8_axes: Vec<Pauli>,
+        pi_over_4_axes: Vec<Pauli>,
+    }, // Measurement should be listed below, but it is not implemented yet.
+}
+
+impl OperationWithAdditionalData {
+    pub fn id(&self) -> OperationId {
+        use OperationWithAdditionalData::*;
+        match self {
+            PiOver4Rotation { id, .. } => *id,
+            PiOver8Rotation { id, .. } => *id,
+            SingleQubitPiOver8RotationBlock { id, .. } => *id,
+        }
+    }
+}
+
+impl serde::Serialize for OperationWithAdditionalData {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use OperationWithAdditionalData::*;
+        macro_rules! put {
+            ( $type:expr, $length:expr, $($x:expr ),* ) => {{
+                let mut state = serializer.serialize_struct("Operation", $length + 1)?;
+                state.serialize_field("type", $type)?;
+                $(
+                    let (k, v) = $x;
+                    state.serialize_field(k, &v)?;
+                )*
+                state.end()
+            }};
+        }
+
+        match self {
+            PiOver4Rotation { id, targets } => {
+                put!("PI_OVER_4_ROTATION", 2, ("id", id.id), ("targets", Targets::new(targets)))
+            }
+            PiOver8Rotation {
+                id,
+                targets,
+                num_distillations,
+                num_distillations_on_retry,
+            } => {
+                put!(
+                    "PI_OVER_8_ROTATION",
+                    4,
+                    ("id", id.id),
+                    ("targets", Targets::new(targets)),
+                    ("num_distillations", num_distillations),
+                    ("num_distillations_on_retry", num_distillations_on_retry)
+                )
+            }
+            SingleQubitPiOver8RotationBlock {
+                id,
+                target,
+                pi_over_8_axes,
+                pi_over_4_axes,
+            } => {
+                put!(
+                    "SINGLE_QUBIT_PI_OVER_8_ROTATION_BLOCK",
+                    4,
+                    ("id", id.id),
+                    ("target", target),
+                    ("pi_over_8_axes", pi_over_8_axes),
+                    ("pi_over_4_axes", pi_over_4_axes)
+                )
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
@@ -20,16 +151,8 @@ pub enum BoardOccupancy {
     DataQubitInOperation(OperationId),
     YInitialization(OperationId),
     YMeasurement(OperationId),
-    MagicStateDistillation {
-        id: OperationId,
-        num_distillations: u32,
-        num_distillations_on_retry: u32,
-    },
-    PiOver8RotationBlock {
-        id: OperationId,
-        pi_over_8_axes: Vec<Pauli>,
-        pi_over_4_axes: Vec<Pauli>,
-    },
+    MagicStateDistillation(OperationId),
+    PiOver8RotationBlock(OperationId),
 }
 
 impl serde::Serialize for BoardOccupancy {
@@ -39,68 +162,45 @@ impl serde::Serialize for BoardOccupancy {
     {
         use BoardOccupancy::*;
 
-        let mut map = HashMap::<&str, String>::new();
+        let type_: &str;
+        let mut operation_id: Option<OperationId> = None;
         match self {
             Vacant => {
-                map.insert("type", "VACANT".to_string());
+                type_ = "VACANT";
             }
             LatticeSurgery(id) => {
-                map.insert("type", "LATTICE_SURGERY".to_string());
-                map.insert("operation_id", id.id.to_string());
+                type_ = "LATTICE_SURGERY";
+                operation_id = Some(*id);
             }
             IdleDataQubit => {
-                map.insert("type", "IDLE_DATA_QUBIT".to_string());
+                type_ = "IDLE_DATA_QUBIT";
             }
             DataQubitInOperation(id) => {
-                map.insert("type", "DATA_QUBIT_IN_OPERATION".to_string());
-                map.insert("operation_id", id.id.to_string());
+                type_ = "DATA_QUBIT_IN_OPERATION";
+                operation_id = Some(*id);
             }
             YInitialization(id) => {
-                map.insert("type", "Y_INITIALIZATION".to_string());
-                map.insert("operation_id", id.id.to_string());
+                type_ = "Y_INITIALIZATION";
+                operation_id = Some(*id);
             }
             YMeasurement(id) => {
-                map.insert("type", "Y_MEASUREMENT".to_string());
-                map.insert("operation_id", id.id.to_string());
+                type_ = "Y_MEASUREMENT";
+                operation_id = Some(*id);
             }
-            MagicStateDistillation {
-                id,
-                num_distillations,
-                num_distillations_on_retry,
-            } => {
-                map.insert("type", "MAGIC_STATE_DISTILLATION".to_string());
-                map.insert("operation_id", id.id.to_string());
-                map.insert("num_distillations", num_distillations.to_string());
-                map.insert("num_distillations_on_retry", num_distillations_on_retry.to_string());
+            MagicStateDistillation(id) => {
+                type_ = "MAGIC_STATE_DISTILLATION";
+                operation_id = Some(*id);
             }
-            PiOver8RotationBlock {
-                id,
-                pi_over_8_axes,
-                pi_over_4_axes,
-            } => {
-                map.insert("type", "PI_OVER_8_ROTATION_BLOCK".to_string());
-                map.insert("operation_id", id.id.to_string());
-                map.insert(
-                    "pi_over_8_axes",
-                    pi_over_8_axes
-                        .iter()
-                        .map(|a| a.to_string())
-                        .collect::<Vec<_>>()
-                        .join(""),
-                );
-                map.insert(
-                    "pi_over_4_axes",
-                    pi_over_4_axes
-                        .iter()
-                        .map(|a| a.to_string())
-                        .collect::<Vec<_>>()
-                        .join(""),
-                );
+            PiOver8RotationBlock(id) => {
+                type_ = "PI_OVER_8_ROTATION_BLOCK";
+                operation_id = Some(*id);
             }
         }
-        let mut state = serializer.serialize_struct("ScheduleEntry", map.len())?;
-        for (k, v) in map {
-            state.serialize_field(k, &v)?;
+        let len = if operation_id.is_some() { 2 } else { 1 };
+        let mut state = serializer.serialize_struct("ScheduleEntry", len)?;
+        state.serialize_field("type", type_)?;
+        if let Some(id) = operation_id {
+            state.serialize_field("operation_id", &id.id)?;
         }
         state.end()
     }
@@ -114,6 +214,7 @@ pub struct Board {
     cycle_after_last_operation_at: Vec<u32>,
     cycle: u32,
     current_operation_id: OperationId,
+    operations: Vec<OperationWithAdditionalData>,
     preferable_distillation_area_size: u32,
 }
 
@@ -170,6 +271,7 @@ impl Board {
             cycle_after_last_operation_at: vec![],
             cycle: 0,
             current_operation_id,
+            operations: vec![],
             preferable_distillation_area_size: 1,
         }
     }
@@ -190,6 +292,10 @@ impl Board {
         let id = self.current_operation_id;
         self.current_operation_id.increment();
         id
+    }
+
+    pub fn operations(&self) -> &[OperationWithAdditionalData] {
+        &self.operations
     }
 
     pub fn schedule(&mut self, op: &Operation) -> bool {
@@ -254,6 +360,7 @@ impl Board {
             let o = BoardOccupancy::DataQubitInOperation(operation_id);
             self.set_occupancy(x, y, c, o);
         }
+        // TODO: We should push the measurement operation to `self.operations`.
         self.set_cycle_after_last_operation_at(qubit, self.cycle + self.cycle + duration);
 
         true
@@ -316,7 +423,11 @@ impl Board {
                 if x < self.conf.width - 1 {
                     candidates.push((x + 1, y));
                 }
-                self.schedule_pi_over_4_rotation_internal(&[(qubit, x, y)], &[(x, y)], &candidates)
+                self.schedule_pi_over_4_rotation_internal(
+                    &[(qubit, x, y, axis)],
+                    &[(x, y)],
+                    &candidates,
+                )
             }
             Pauli::Z => {
                 let mut candidates = vec![];
@@ -326,7 +437,11 @@ impl Board {
                 if y < self.conf.height - 1 {
                     candidates.push((x, y + 1));
                 }
-                self.schedule_pi_over_4_rotation_internal(&[(qubit, x, y)], &[(x, y)], &candidates)
+                self.schedule_pi_over_4_rotation_internal(
+                    &[(qubit, x, y, axis)],
+                    &[(x, y)],
+                    &candidates,
+                )
             }
             Pauli::Y => panic!("Not implemented"),
         }
@@ -372,7 +487,7 @@ impl Board {
         }
 
         self.schedule_pi_over_4_rotation_internal(
-            &[(q1, x1, y1), (q2, x2, y2)],
+            &[(q1, x1, y1, axis1), (q2, x2, y2, axis2)],
             &path,
             &adjacent_ancilla_candidates,
         )
@@ -380,7 +495,7 @@ impl Board {
 
     fn schedule_pi_over_4_rotation_internal(
         &mut self,
-        targets: &[(Qubit, u32, u32)],
+        targets: &[(Qubit, u32, u32, Pauli)],
         path: &[(u32, u32)],
         ancilla_candidates: &[(u32, u32)],
     ) -> bool {
@@ -400,7 +515,7 @@ impl Board {
                     for c in cycle..cycle + distance {
                         self.set_occupancy(x, y, c, BoardOccupancy::LatticeSurgery(id));
                     }
-                    for (q, _, _) in targets {
+                    for (q, _, _, _) in targets {
                         self.set_cycle_after_last_operation_at(*q, cycle + distance);
                     }
                     found = true;
@@ -418,7 +533,7 @@ impl Board {
                     for c in cycle + distance..cycle + distance + y_measurement_cost(distance) {
                         self.set_occupancy(x, y, c, BoardOccupancy::YMeasurement(id));
                     }
-                    for (q, _, _) in targets {
+                    for (q, _, _, _) in targets {
                         self.set_cycle_after_last_operation_at(*q, cycle + distance);
                     }
                     found = true;
@@ -432,7 +547,7 @@ impl Board {
         }
 
         for &(x, y) in path {
-            let in_targets = targets.iter().any(|&(_, xt, yt)| xt == x && yt == y);
+            let in_targets = targets.iter().any(|&(_, xt, yt, _)| xt == x && yt == y);
             let occupancy = if in_targets {
                 BoardOccupancy::DataQubitInOperation(id)
             } else {
@@ -440,7 +555,14 @@ impl Board {
             };
             self.set_occupancy_range(x, y, cycle..cycle + distance, occupancy);
         }
-
+        self.operations
+            .push(OperationWithAdditionalData::PiOver4Rotation {
+                id,
+                targets: targets
+                    .iter()
+                    .map(|&(_, x, y, axis)| (Position { x, y }, axis))
+                    .collect(),
+            });
         true
     }
 
@@ -793,6 +915,7 @@ impl Board {
             if self.place_gates_for_single_qubit_pi_over_8_rotation(
                 x,
                 y,
+                axis,
                 distillation_area,
                 routing_qubits,
             ) {
@@ -808,6 +931,7 @@ impl Board {
         &mut self,
         x: u32,
         y: u32,
+        axis: Pauli,
         distillation_area: &[(u32, u32)],
         routing_qubits: &[(u32, u32)],
     ) -> bool {
@@ -844,12 +968,7 @@ impl Board {
             }
         }
         for &(x, y) in distillation_area {
-            let num_distillations_on_retry = distillation_area.len() as u32;
-            let occupancy = BoardOccupancy::MagicStateDistillation {
-                id,
-                num_distillations,
-                num_distillations_on_retry,
-            };
+            let occupancy = BoardOccupancy::MagicStateDistillation(id);
             let mut c = cycle;
             while c >= distillation_cost && self.is_vacant(x, y, c - distillation_cost..c) {
                 c -= distillation_cost;
@@ -865,6 +984,13 @@ impl Board {
         }
 
         self.set_occupancy_range(cx, cy, correction_range, BoardOccupancy::YMeasurement(id));
+        self.operations
+            .push(OperationWithAdditionalData::PiOver8Rotation {
+                id,
+                targets: vec![(Position { x, y }, axis)],
+                num_distillations,
+                num_distillations_on_retry: distillation_area.len() as u32,
+            });
 
         true
     }
@@ -1116,11 +1242,7 @@ impl Board {
         let id = self.issue_operation_id();
         self.set_occupancy_range(x, y, cycle..last_correction_range.end, DataQubitInOperation(id));
 
-        let occupancy = PiOver8RotationBlock {
-            id,
-            pi_over_8_axes: pi_over_8_rotation_axes.to_vec(),
-            pi_over_4_axes: pi_over_4_rotation_axes.to_vec(),
-        };
+        let occupancy = PiOver8RotationBlock(id);
         for &(x, y) in routing_qubits.iter().chain(distillation_qubits) {
             self.set_occupancy_range(x, y, block_cycle_range.clone(), occupancy.clone());
         }
@@ -1141,6 +1263,14 @@ impl Board {
 
         // The Y measurement for the last Clifford correction.
         self.set_occupancy_range(cx2, cy2, last_y_measurement_range, YMeasurement(id));
+
+        self.operations
+            .push(OperationWithAdditionalData::SingleQubitPiOver8RotationBlock {
+                id,
+                target: Position { x, y },
+                pi_over_8_axes: pi_over_8_rotation_axes.to_vec(),
+                pi_over_4_axes: pi_over_4_rotation_axes.to_vec(),
+            });
 
         true
     }
@@ -1663,6 +1793,12 @@ mod tests {
         assert!(!board.has_schedule_at_or_after(Qubit::new(0), 7));
         assert!(!board.has_schedule_at_or_after(Qubit::new(1), 0));
         assert!(!board.has_schedule_at_or_after(Qubit::new(2), 0));
+
+        let operations = vec![OperationWithAdditionalData::PiOver4Rotation {
+            id,
+            targets: vec![(Position { x: 0, y: 0 }, Pauli::X)],
+        }];
+        assert_eq!(board.operations, operations);
     }
 
     #[test]
@@ -1724,6 +1860,12 @@ mod tests {
         assert!(!board.has_schedule_at_or_after(Qubit::new(1), 0));
         assert!(board.has_schedule_at_or_after(Qubit::new(2), 8));
         assert!(!board.has_schedule_at_or_after(Qubit::new(2), 9));
+
+        let operations = vec![OperationWithAdditionalData::PiOver4Rotation {
+            id,
+            targets: vec![(Position { x: 2, y: 2 }, Pauli::Z)],
+        }];
+        assert_eq!(board.operations, operations);
     }
 
     #[test]
@@ -1782,6 +1924,22 @@ mod tests {
         assert!(!board.has_schedule_at_or_after(Qubit::new(1), 3));
         assert!(board.has_schedule_at_or_after(Qubit::new(2), 2));
         assert!(!board.has_schedule_at_or_after(Qubit::new(2), 3));
+
+        let operations = vec![
+            OperationWithAdditionalData::PiOver4Rotation {
+                id: OperationId { id: 1 },
+                targets: vec![(Position { x: 0, y: 1 }, Pauli::Z)],
+            },
+            OperationWithAdditionalData::PiOver4Rotation {
+                id: OperationId { id: 2 },
+                targets: vec![(Position { x: 1, y: 1 }, Pauli::Z)],
+            },
+            OperationWithAdditionalData::PiOver4Rotation {
+                id: OperationId { id: 3 },
+                targets: vec![(Position { x: 2, y: 1 }, Pauli::Z)],
+            },
+        ];
+        assert_eq!(board.operations, operations);
     }
 
     #[test]
@@ -1841,6 +1999,22 @@ mod tests {
         assert!(!board.has_schedule_at_or_after(Qubit::new(1), 3));
         assert!(board.has_schedule_at_or_after(Qubit::new(2), 2));
         assert!(!board.has_schedule_at_or_after(Qubit::new(2), 3));
+
+        let operations = vec![
+            OperationWithAdditionalData::PiOver4Rotation {
+                id: OperationId { id: 2 },
+                targets: vec![(Position { x: 1, y: 0 }, Pauli::X)],
+            },
+            OperationWithAdditionalData::PiOver4Rotation {
+                id: OperationId { id: 3 },
+                targets: vec![(Position { x: 1, y: 1 }, Pauli::X)],
+            },
+            OperationWithAdditionalData::PiOver4Rotation {
+                id: OperationId { id: 4 },
+                targets: vec![(Position { x: 1, y: 2 }, Pauli::X)],
+            },
+        ];
+        assert_eq!(board.operations, operations);
     }
 
     #[test]
@@ -1867,6 +2041,7 @@ mod tests {
             angle: Angle::PiOver4,
             axis: new_axis("IXX")
         }));
+        assert_eq!(board.operations, vec![]);
     }
 
     #[test]
@@ -2159,6 +2334,15 @@ mod tests {
         assert!(board.is_occupancy(1, 1, 11..12, YInitialization(dummy_id)));
         assert!(board.is_occupancy(1, 2, 11..12, Vacant));
         assert!(board.is_occupancy(1, 3, 11..12, IdleDataQubit));
+
+        let operations = vec![OperationWithAdditionalData::PiOver4Rotation {
+            id,
+            targets: vec![
+                (Position { x: 0, y: 0 }, Pauli::X),
+                (Position { x: 1, y: 3 }, Pauli::Z),
+            ],
+        }];
+        assert_eq!(board.operations, operations);
     }
 
     #[test]
@@ -2215,6 +2399,15 @@ mod tests {
         assert!(!board.has_schedule_at_or_after(Qubit::new(0), 3));
         assert!(board.has_schedule_at_or_after(Qubit::new(1), 2));
         assert!(!board.has_schedule_at_or_after(Qubit::new(1), 3));
+
+        let operations = vec![OperationWithAdditionalData::PiOver4Rotation {
+            id,
+            targets: vec![
+                (Position { x: 0, y: 0 }, Pauli::X),
+                (Position { x: 1, y: 3 }, Pauli::Z),
+            ],
+        }];
+        assert_eq!(board.operations, operations);
     }
 
     #[test]
@@ -2260,6 +2453,15 @@ mod tests {
         assert!(board.is_occupancy(2, 1, 3..7, Vacant));
         assert!(board.is_occupancy(2, 2, 3..7, Vacant));
         assert!(board.is_occupancy(2, 3, 3..7, Vacant));
+
+        let operations = vec![OperationWithAdditionalData::PiOver4Rotation {
+            id,
+            targets: vec![
+                (Position { x: 0, y: 1 }, Pauli::Y),
+                (Position { x: 0, y: 2 }, Pauli::Y),
+            ],
+        }];
+        assert_eq!(board.operations, operations);
     }
 
     #[test]
@@ -2291,6 +2493,7 @@ mod tests {
             angle: Angle::PiOver8,
             axis: new_axis("Z")
         })));
+        assert_eq!(board.operations, vec![]);
     }
 
     #[test]
@@ -2324,6 +2527,7 @@ mod tests {
             angle: Angle::PiOver8,
             axis: new_axis("IZ")
         })));
+        assert!(board.operations.is_empty());
     }
 
     #[test]
@@ -2348,6 +2552,7 @@ mod tests {
 
         board.cycle = 5;
         assert!(!board.schedule_single_qubit_pi_over_8_rotation(Qubit::new(0), Pauli::Z, 1, 1));
+        assert!(board.operations.is_empty());
     }
 
     #[test]
@@ -2396,13 +2601,8 @@ mod tests {
         board.cycle = 15;
         assert!(board.schedule_single_qubit_pi_over_8_rotation(Qubit::new(0), Pauli::Z, 5, 2));
         let id = OperationId { id: 0 };
-        let distillation = MagicStateDistillation {
-            id,
-            num_distillations: 6,
-            num_distillations_on_retry: 2,
-        };
 
-        assert!(board.is_occupancy(0, 0, 0..15, distillation.clone()));
+        assert!(board.is_occupancy(0, 0, 0..15, MagicStateDistillation(id)));
         assert!(board.is_occupancy(0, 0, 15..18, LatticeSurgery(id)));
         assert!(board.is_occupancy(0, 0, 18..21, YMeasurement(id)));
         assert!(board.is_occupancy(0, 1, 0..15, IdleDataQubit));
@@ -2410,7 +2610,7 @@ mod tests {
         assert!(board.is_occupancy(0, 1, 18..21, IdleDataQubit));
         assert!(board.is_occupancy(0, 2, 0..21, IdleDataQubit));
         assert!(board.is_occupancy(0, 3, 0..21, Vacant));
-        assert!(board.is_occupancy(1, 0, 0..15, distillation));
+        assert!(board.is_occupancy(1, 0, 0..15, MagicStateDistillation(id)));
         assert!(board.is_occupancy(1, 0, 15..18, LatticeSurgery(id)));
         assert!(board.is_occupancy(1, 0, 18..21, Vacant));
         assert!(board.is_occupancy(1, 1, 0..21, Vacant));
@@ -2424,6 +2624,14 @@ mod tests {
         assert!(board.has_schedule_at_or_after(Qubit::new(0), 17));
         assert!(!board.has_schedule_at_or_after(Qubit::new(0), 18));
         assert!(!board.has_schedule_at_or_after(Qubit::new(1), 0));
+
+        let operations = vec![OperationWithAdditionalData::PiOver8Rotation {
+            id,
+            targets: vec![(Position { x: 0, y: 1 }, Pauli::Z)],
+            num_distillations: 6,
+            num_distillations_on_retry: 2,
+        }];
+        assert_eq!(board.operations, operations);
     }
 
     #[test]
@@ -2469,11 +2677,6 @@ mod tests {
         assert!(board.schedule_single_qubit_pi_over_8_rotation(Qubit::new(0), Pauli::X, 5, 2));
 
         let id = OperationId { id: 0 };
-        let distillation = MagicStateDistillation {
-            id,
-            num_distillations: 6,
-            num_distillations_on_retry: 2,
-        };
 
         assert!(board.is_occupancy(0, 0, 0..21, Vacant));
         assert!(board.is_occupancy(0, 1, 0..15, IdleDataQubit));
@@ -2482,13 +2685,13 @@ mod tests {
         assert!(board.is_occupancy(0, 2, 0..21, IdleDataQubit));
         assert!(board.is_occupancy(0, 3, 0..21, Vacant));
         assert!(board.is_occupancy(1, 0, 0..21, Vacant));
-        assert!(board.is_occupancy(1, 1, 0..15, distillation.clone()));
+        assert!(board.is_occupancy(1, 1, 0..15, MagicStateDistillation(id)));
         assert!(board.is_occupancy(1, 1, 15..18, LatticeSurgery(id)));
         assert!(board.is_occupancy(1, 1, 18..21, YMeasurement(id)));
         assert!(board.is_occupancy(1, 2, 0..21, Vacant));
         assert!(board.is_occupancy(1, 3, 0..21, Vacant));
         assert!(board.is_occupancy(2, 0, 0..21, Vacant));
-        assert!(board.is_occupancy(2, 1, 0..15, distillation));
+        assert!(board.is_occupancy(2, 1, 0..15, MagicStateDistillation(id)));
         assert!(board.is_occupancy(2, 1, 15..18, LatticeSurgery(id)));
         assert!(board.is_occupancy(2, 1, 18..21, Vacant));
         assert!(board.is_occupancy(2, 2, 0..21, Vacant));
@@ -2496,6 +2699,14 @@ mod tests {
         assert!(board.has_schedule_at_or_after(Qubit::new(0), 17));
         assert!(!board.has_schedule_at_or_after(Qubit::new(0), 18));
         assert!(!board.has_schedule_at_or_after(Qubit::new(1), 0));
+
+        let operations = vec![OperationWithAdditionalData::PiOver8Rotation {
+            id,
+            targets: vec![(Position { x: 0, y: 1 }, Pauli::X)],
+            num_distillations: 6,
+            num_distillations_on_retry: 2,
+        }];
+        assert_eq!(board.operations, operations);
     }
 
     #[test]
@@ -2548,11 +2759,6 @@ mod tests {
         }));
 
         let id = OperationId { id: 0 };
-        let distillation = MagicStateDistillation {
-            id,
-            num_distillations: 6,
-            num_distillations_on_retry: 3,
-        };
 
         assert!(board.is_occupancy(0, 0, 0..10, Vacant));
         assert!(board.is_occupancy(0, 0, 10..13, LatticeSurgery(id)));
@@ -2568,21 +2774,29 @@ mod tests {
         assert!(board.is_occupancy(1, 1, 0..10, Vacant));
         assert!(board.is_occupancy(1, 1, 10..13, LatticeSurgery(id)));
         assert!(board.is_occupancy(1, 1, 13..16, Vacant));
-        assert!(board.is_occupancy(1, 2, 0..10, distillation.clone()));
+        assert!(board.is_occupancy(1, 2, 0..10, MagicStateDistillation(id)));
         assert!(board.is_occupancy(1, 2, 10..13, LatticeSurgery(id)));
         assert!(board.is_occupancy(1, 2, 13..16, Vacant));
         assert!(board.is_occupancy(1, 3, 0..16, Vacant));
         assert!(board.is_occupancy(2, 0, 0..16, Vacant));
-        assert!(board.is_occupancy(2, 1, 0..10, distillation.clone()));
+        assert!(board.is_occupancy(2, 1, 0..10, MagicStateDistillation(id)));
         assert!(board.is_occupancy(2, 1, 10..13, LatticeSurgery(id)));
         assert!(board.is_occupancy(2, 1, 13..16, YMeasurement(id)));
-        assert!(board.is_occupancy(2, 2, 0..10, distillation));
+        assert!(board.is_occupancy(2, 2, 0..10, MagicStateDistillation(id)));
         assert!(board.is_occupancy(2, 2, 10..13, LatticeSurgery(id)));
         assert!(board.is_occupancy(2, 2, 13..16, Vacant));
         assert!(board.is_occupancy(2, 3, 0..16, Vacant));
         assert!(board.has_schedule_at_or_after(Qubit::new(0), 12));
         assert!(!board.has_schedule_at_or_after(Qubit::new(0), 13));
         assert!(!board.has_schedule_at_or_after(Qubit::new(1), 0));
+
+        let operations = vec![OperationWithAdditionalData::PiOver8Rotation {
+            id,
+            targets: vec![(Position { x: 0, y: 1 }, Pauli::Y)],
+            num_distillations: 6,
+            num_distillations_on_retry: 3,
+        }];
+        assert_eq!(board.operations, operations);
     }
 
     #[test]
@@ -2609,6 +2823,7 @@ mod tests {
             &[Pauli::X, Pauli::Y],
             5
         ));
+        assert!(board.operations.is_empty());
     }
 
     #[test]
@@ -2640,6 +2855,7 @@ mod tests {
             &[Pauli::X, Pauli::Y],
             5
         ));
+        assert!(board.operations.is_empty());
     }
 
     #[test]
@@ -2665,6 +2881,7 @@ mod tests {
             &[Pauli::X, Pauli::Y],
             5
         ));
+        assert!(board.operations.is_empty());
     }
 
     #[test]
@@ -2695,42 +2912,37 @@ mod tests {
         ));
 
         let id = OperationId { id: 0 };
-        let block_occupancy = PiOver8RotationBlock {
-            id,
-            pi_over_8_axes: pi_over_8_axes.to_vec(),
-            pi_over_4_axes: pi_over_4_axes.to_vec(),
-        };
 
         assert!(board.is_occupancy(0, 0, 0..33, DataQubitInOperation(id)));
         assert!(board.is_occupancy(0, 0, 33..40, IdleDataQubit));
-        assert!(board.is_occupancy(1, 0, 0..27, block_occupancy.clone()));
+        assert!(board.is_occupancy(1, 0, 0..27, PiOver8RotationBlock(id)));
         assert!(board.is_occupancy(1, 0, 27..33, LatticeSurgery(id)));
         assert!(board.is_occupancy(1, 0, 33..36, YMeasurement(id)));
         assert!(board.is_occupancy(1, 0, 36..40, Vacant));
-        assert!(board.is_occupancy(2, 0, 0..27, block_occupancy.clone()));
+        assert!(board.is_occupancy(2, 0, 0..27, PiOver8RotationBlock(id)));
         assert!(board.is_occupancy(2, 0, 27..30, LatticeSurgery(id)));
         assert!(board.is_occupancy(2, 0, 30..40, Vacant));
 
-        assert!(board.is_occupancy(0, 1, 0..27, block_occupancy.clone()));
+        assert!(board.is_occupancy(0, 1, 0..27, PiOver8RotationBlock(id)));
         assert!(board.is_occupancy(0, 1, 27..33, LatticeSurgery(id)));
         assert!(board.is_occupancy(0, 1, 33..40, Vacant));
-        assert!(board.is_occupancy(1, 1, 0..27, block_occupancy.clone()));
+        assert!(board.is_occupancy(1, 1, 0..27, PiOver8RotationBlock(id)));
         assert!(board.is_occupancy(1, 1, 27..33, LatticeSurgery(id)));
         assert!(board.is_occupancy(1, 1, 33..40, Vacant));
-        assert!(board.is_occupancy(2, 1, 0..27, block_occupancy.clone()));
+        assert!(board.is_occupancy(2, 1, 0..27, PiOver8RotationBlock(id)));
         assert!(board.is_occupancy(2, 1, 27..30, LatticeSurgery(id)));
         assert!(board.is_occupancy(2, 1, 30..40, Vacant));
 
-        assert!(board.is_occupancy(0, 2, 0..27, block_occupancy.clone()));
+        assert!(board.is_occupancy(0, 2, 0..27, PiOver8RotationBlock(id)));
         assert!(board.is_occupancy(0, 2, 27..30, LatticeSurgery(id)));
         assert!(board.is_occupancy(0, 2, 30..33, YMeasurement(id)));
         assert!(board.is_occupancy(0, 2, 33..40, Vacant));
-        assert!(board.is_occupancy(1, 2, 0..27, block_occupancy.clone()));
+        assert!(board.is_occupancy(1, 2, 0..27, PiOver8RotationBlock(id)));
         assert!(board.is_occupancy(1, 2, 27..30, LatticeSurgery(id)));
         assert!(board.is_occupancy(1, 2, 30..40, Vacant));
         assert!(board.is_occupancy(2, 2, 0..40, Vacant));
 
-        assert!(board.is_occupancy(0, 3, 0..27, block_occupancy.clone()));
+        assert!(board.is_occupancy(0, 3, 0..27, PiOver8RotationBlock(id)));
         assert!(board.is_occupancy(0, 3, 27..30, LatticeSurgery(id)));
         assert!(board.is_occupancy(0, 3, 30..33, Vacant));
         assert!(board.is_occupancy(1, 3, 0..40, Vacant));
@@ -2738,5 +2950,67 @@ mod tests {
 
         assert!(board.has_schedule_at_or_after(Qubit::new(0), 32));
         assert!(!board.has_schedule_at_or_after(Qubit::new(0), 33));
+
+        let operations = vec![
+            OperationWithAdditionalData::SingleQubitPiOver8RotationBlock {
+                id,
+                target: Position { x: 0, y: 0 },
+                pi_over_8_axes: pi_over_8_axes.to_vec(),
+                pi_over_4_axes: pi_over_4_axes.to_vec(),
+            },
+        ];
+        assert_eq!(board.operations, operations);
+    }
+
+    #[test]
+    fn test_pi_over_4_rotation_serialization() {
+        let id = OperationId { id: 99 };
+        let pos1 = Position { x: 0, y: 1 };
+        let pos2 = Position { x: 4, y: 8 };
+        let targets = vec![(pos1, Pauli::Z), (pos2, Pauli::X)];
+        let op = OperationWithAdditionalData::PiOver4Rotation { id, targets };
+
+        let serialized = serde_json::to_string(&op).unwrap();
+        let expectation = r#"{"type":"PI_OVER_4_ROTATION","id":99,"targets":[{"x":0,"y":1,"axis":"Z"},{"x":4,"y":8,"axis":"X"}]}"#;
+
+        assert_eq!(serialized, expectation);
+    }
+
+    #[test]
+    fn test_pi_over_8_rotation_serialization() {
+        let id = OperationId { id: 91 };
+        let pos1 = Position { x: 0, y: 2 };
+        let pos2 = Position { x: 4, y: 3 };
+        let targets = vec![(pos1, Pauli::Y), (pos2, Pauli::X)];
+        let op = OperationWithAdditionalData::PiOver8Rotation {
+            id,
+            targets,
+            num_distillations: 4,
+            num_distillations_on_retry: 2,
+        };
+
+        let serialized = serde_json::to_string(&op).unwrap();
+        let expectation = r#"{"type":"PI_OVER_8_ROTATION","id":91,"targets":[{"x":0,"y":2,"axis":"Y"},{"x":4,"y":3,"axis":"X"}],"num_distillations":4,"num_distillations_on_retry":2}"#;
+
+        assert_eq!(serialized, expectation);
+    }
+
+    #[test]
+    fn test_single_qubit_arbitrary_angle_rotation_serialization() {
+        let id = OperationId { id: 91 };
+        let pos = Position { x: 0, y: 2 };
+        let pi_over_8_axes = [Pauli::Y, Pauli::Z, Pauli::X, Pauli::Z];
+        let pi_over_4_axes = [Pauli::X, Pauli::Y];
+        let op = OperationWithAdditionalData::SingleQubitPiOver8RotationBlock {
+            id,
+            target: pos,
+            pi_over_8_axes: pi_over_8_axes.to_vec(),
+            pi_over_4_axes: pi_over_4_axes.to_vec(),
+        };
+
+        let serialized = serde_json::to_string(&op).unwrap();
+        let expectation = r#"{"type":"SINGLE_QUBIT_PI_OVER_8_ROTATION_BLOCK","id":91,"target":{"x":0,"y":2},"pi_over_8_axes":["Y","Z","X","Z"],"pi_over_4_axes":["X","Y"]}"#;
+
+        assert_eq!(serialized, expectation);
     }
 }

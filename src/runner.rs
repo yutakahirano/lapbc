@@ -3,7 +3,7 @@ use std::ops::{Index, IndexMut};
 
 use rand::Rng;
 
-use crate::board::Board;
+use crate::board::{Board, OperationWithAdditionalData};
 use crate::board::BoardOccupancy;
 use crate::board::Configuration;
 use crate::board::Map2D;
@@ -58,6 +58,7 @@ impl OccupancyMap {
 }
 
 pub struct Runner {
+    operations: HashMap<OperationId, OperationWithAdditionalData>,
     schedule: OccupancyMap,
     conf: Configuration,
 }
@@ -65,6 +66,7 @@ pub struct Runner {
 impl Runner {
     pub fn new(board: &Board) -> Self {
         Runner {
+            operations: board.operations().iter().map(|op| (op.id(), op.clone())).collect(),
             schedule: OccupancyMap::new(board),
             conf: board.configuration().clone(),
         }
@@ -127,12 +129,17 @@ impl Runner {
 
             // Deal with magic state distillation that can generate new delay.
             for distillation in ending_distillations {
-                if let BoardOccupancy::MagicStateDistillation {
-                    id: _,
-                    num_distillations,
-                    num_distillations_on_retry,
-                } = distillation
-                {
+                if let BoardOccupancy::MagicStateDistillation(
+                    id) = distillation {
+                    let op = self.operations.get(&id).unwrap();
+                    let (num_distillations, num_distillations_on_retry) =
+                    if let OperationWithAdditionalData::PiOver8Rotation { num_distillations, num_distillations_on_retry, ..} = op {
+                        (*num_distillations, *num_distillations_on_retry)
+                    } else {
+                        unreachable!();
+                    };
+
+
                     let mut new_delay = 0;
                     let mut rnd = rand::thread_rng();
                     let mut done = false;

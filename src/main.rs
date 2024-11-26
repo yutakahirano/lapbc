@@ -6,6 +6,7 @@ extern crate qasm;
 
 use board::BoardOccupancy;
 use board::Configuration;
+use board::OperationWithAdditionalData;
 use clap::Parser;
 use lapbc::LapbcCompactOperation;
 use pbc::Operation;
@@ -806,6 +807,7 @@ fn main() {
 
         #[derive(serde::Serialize)]
         struct Schedule {
+            operations: Vec<OperationWithAdditionalData>,
             schedule: Vec<Vec<ScheduleEntry>>,
             width: u32,
             height: u32,
@@ -828,6 +830,7 @@ fn main() {
             .collect::<Vec<_>>();
 
         let schedule = Schedule {
+            operations: board.operations().to_vec(),
             schedule,
             width,
             height,
