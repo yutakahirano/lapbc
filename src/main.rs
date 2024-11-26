@@ -7,8 +7,8 @@ extern crate qasm;
 use board::BoardOccupancy;
 use board::Configuration;
 use clap::Parser;
-use lapbc::LapbcCompactOperator;
-use pbc::Operator;
+use lapbc::LapbcCompactOperation;
+use pbc::Operation;
 use std::env;
 use std::fmt::Write;
 use std::io::IsTerminal;
@@ -154,9 +154,9 @@ fn extract_classical_bit(
 // This is due to the following reasons:
 //   1. 0 == -0.
 //   2. pi == -pi mod 2pi.
-//   3. pi/2 and -pi/2 are equivalent, given Pauli operators are self-inverse.
+//   3. pi/2 and -pi/2 are equivalent, given Pauli operations are self-inverse.
 //   4. pi/4 and -pi/4 are equivalent, because P(pi/4) = P(pi/2) * P(-pi/4) = PP(-pi/4) where P is
-//      a Pauli operator. Pauli operators can be applied in the controlling classical computers
+//      a Pauli operation. Pauli operations can be applied in the controlling classical computers
 //      with the feed-forward mechanism.
 //   5. Given that we use a magic state for a pi/8 rotation, a pi/8 rotation turns to a -pi/8
 //      rotation with a 1/2 probability. In that sense, pi/8 and -pi/8 are equivalent.
@@ -200,14 +200,14 @@ fn translate_gate(
     args: &[qasm::Argument],
     angle_args: &[String],
     registers: &Registers,
-    output: &mut Vec<pbc::Operator>,
+    output: &mut Vec<pbc::Operation>,
 ) -> Result<(), String> {
-    use pbc::Operator::Measurement as M;
-    use pbc::Operator::PauliRotation as R;
+    use pbc::Operation::Measurement as M;
+    use pbc::Operation::PauliRotation as R;
     let num_qubits = registers.num_qubits();
     match name {
         "x" | "y" | "z" => {
-            // Pauli operators are dealt with classically.
+            // Pauli operations are dealt with classically.
             return Ok(());
         }
         "rz" => {
@@ -328,7 +328,7 @@ fn translate_gate(
     Ok(())
 }
 
-fn extract(nodes: &[qasm::AstNode]) -> Option<(Vec<Operator>, Registers)> {
+fn extract(nodes: &[qasm::AstNode]) -> Option<(Vec<Operation>, Registers)> {
     use qasm::AstNode;
     let mut registers = Registers::new();
     if !nodes.iter().all(|node| match node {
@@ -552,7 +552,7 @@ fn extract_and_print(nodes: &[qasm::AstNode]) -> Option<(Vec<PauliRotation>, Reg
     let cliffords = ops
         .iter()
         .filter_map(|op| match op {
-            pbc::Operator::PauliRotation(r) => {
+            pbc::Operation::PauliRotation(r) => {
                 if r.is_clifford() {
                     Some(r.clone())
                 } else {
@@ -564,10 +564,10 @@ fn extract_and_print(nodes: &[qasm::AstNode]) -> Option<(Vec<PauliRotation>, Reg
         .collect::<Vec<_>>();
 
     let num_qubits = match &result[0] {
-        pbc::Operator::PauliRotation(r) => r.axis.len(),
-        pbc::Operator::Measurement(a) => a.len(),
+        pbc::Operation::PauliRotation(r) => r.axis.len(),
+        pbc::Operation::Measurement(a) => a.len(),
     };
-    // Print logical operators.
+    // Print logical operations.
     for i in 0..num_qubits {
         let mut a = Axis::new(vec![Pauli::I; num_qubits]);
         a[i] = Pauli::X;
@@ -587,7 +587,7 @@ fn extract_and_print(nodes: &[qasm::AstNode]) -> Option<(Vec<PauliRotation>, Reg
     }
 
     println!();
-    // Print SPC operators.
+    // Print SPC operations.
     for (i, op) in result.iter().enumerate() {
         let mut out = String::new();
         write!(&mut out, "{:>4} {:}", i, op).unwrap();
@@ -595,7 +595,7 @@ fn extract_and_print(nodes: &[qasm::AstNode]) -> Option<(Vec<PauliRotation>, Reg
     }
     println!();
 
-    // Print SPC compact operators.
+    // Print SPC compact operations.
     println!("SPC compact");
     let mut spc_compact_clocks = 0_u32;
     let compact_result = pbc::spc_compact_translation(&ops);
@@ -616,13 +616,13 @@ fn extract_and_print(nodes: &[qasm::AstNode]) -> Option<(Vec<PauliRotation>, Reg
     for (i, op) in lapbc_result.iter().enumerate() {
         lapbc_compact_clocks += op.clocks();
         match op {
-            LapbcCompactOperator::Operator(_) => {
+            LapbcCompactOperation::Operation(_) => {
                 lapbc_compact_num_spc_ops += 1;
             }
-            LapbcCompactOperator::AxisPermutation(_) => {
+            LapbcCompactOperation::AxisPermutation(_) => {
                 lapbc_compact_axis_permutations += 1;
             }
-            LapbcCompactOperator::Noop => (),
+            LapbcCompactOperation::Noop => (),
         }
         let mut out = String::new();
         write!(&mut out, "{:>4} {:}", i, op).unwrap();
@@ -713,7 +713,7 @@ fn main() {
 
     let mut board = board::Board::new(mapping, &conf);
     board.set_preferable_distillation_area_size(5);
-    let mut schedule: Vec<(usize, Operator, u32)> = Vec::new();
+    let mut schedule: Vec<(usize, Operation, u32)> = Vec::new();
 
     for (layer_index, (start, end)) in layers.iter().enumerate() {
         println!();
@@ -907,7 +907,7 @@ mod tests {
 
     #[test]
     fn test_translate_ry() {
-        use pbc::Operator::PauliRotation as R;
+        use pbc::Operation::PauliRotation as R;
         let mut ops = Vec::new();
         let args = vec![Argument::Qubit("q".to_string(), 2)];
         let angle_args = vec![" 3 * pi / 4 ".to_string()];
@@ -980,7 +980,7 @@ mod tests {
 
     #[test]
     fn test_translate_rz() {
-        use pbc::Operator::PauliRotation as R;
+        use pbc::Operation::PauliRotation as R;
         let mut ops = Vec::new();
         let args = vec![Argument::Qubit("q".to_string(), 2)];
         let angle_args = vec![" 3 * pi / 4 ".to_string()];
@@ -1053,7 +1053,7 @@ mod tests {
 
     #[test]
     fn test_translate_sx() {
-        use pbc::Operator::PauliRotation as R;
+        use pbc::Operation::PauliRotation as R;
         let mut ops = Vec::new();
         let args = vec![Argument::Qubit("q".to_string(), 1)];
         let regs = new_qregs(4);
@@ -1096,7 +1096,7 @@ mod tests {
 
     #[test]
     fn test_translate_measurement() {
-        use pbc::Operator::Measurement;
+        use pbc::Operation::Measurement;
         let mut ops = Vec::new();
         let args = vec![
             Argument::Qubit("q".to_string(), 1),
@@ -1179,7 +1179,7 @@ mod tests {
 
     #[test]
     fn test_translate_cx() {
-        use pbc::Operator::PauliRotation as R;
+        use pbc::Operation::PauliRotation as R;
         let mut ops = Vec::new();
         let args = vec![
             Argument::Qubit("q".to_string(), 1),

@@ -1,4 +1,4 @@
-// One-qubit Pauli operator.
+// One-qubit Pauli operation.
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 pub enum Pauli {
     I,
@@ -56,7 +56,7 @@ impl std::fmt::Display for Pauli {
     }
 }
 
-// Axis is a multi-qubit Pauli operator and it represents the rotation axis of a Pauli rotation.
+// Axis is a multi-qubit Pauli operation and it represents the rotation axis of a Pauli rotation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Axis {
     axis: Vec<Pauli>,
@@ -200,43 +200,43 @@ impl std::fmt::Display for PauliRotation {
     }
 }
 
-// Operator represents an operator in the Pauli-based Computation.
+// Operation represents an operation in the Pauli-based Computation.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Operator {
+pub enum Operation {
     PauliRotation(PauliRotation),
     Measurement(Axis),
 }
 
-impl Operator {
+impl Operation {
     #[allow(dead_code)]
     pub fn is_non_clifford_rotation_or_measurement(&self) -> bool {
         match self {
-            Operator::PauliRotation(r) => !r.is_clifford(),
-            Operator::Measurement(..) => true,
+            Operation::PauliRotation(r) => !r.is_clifford(),
+            Operation::Measurement(..) => true,
         }
     }
 
     #[allow(dead_code)]
     pub fn is_single_qubit_clifford(&self) -> bool {
         match self {
-            Operator::PauliRotation(r) => r.is_clifford() && self.has_single_qubit_support(),
-            Operator::Measurement(..) => false,
+            Operation::PauliRotation(r) => r.is_clifford() && self.has_single_qubit_support(),
+            Operation::Measurement(..) => false,
         }
     }
 
     #[allow(dead_code)]
     pub fn is_multi_qubit_clifford(&self) -> bool {
         match self {
-            Operator::PauliRotation(r) => r.is_clifford() && self.has_multi_qubit_support(),
-            Operator::Measurement(..) => false,
+            Operation::PauliRotation(r) => r.is_clifford() && self.has_multi_qubit_support(),
+            Operation::Measurement(..) => false,
         }
     }
 
     #[allow(dead_code)]
     pub fn axis(&self) -> &Axis {
         match self {
-            Operator::PauliRotation(r) => &r.axis,
-            Operator::Measurement(a) => a,
+            Operation::PauliRotation(r) => &r.axis,
+            Operation::Measurement(a) => a,
         }
     }
 
@@ -250,27 +250,27 @@ impl Operator {
     }
 
     #[allow(dead_code)]
-    pub fn commutes_with(&self, other: &Operator) -> bool {
+    pub fn commutes_with(&self, other: &Operation) -> bool {
         self.axis().commutes_with(other.axis())
     }
 }
 
-impl std::fmt::Display for Operator {
+impl std::fmt::Display for Operation {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Operator::PauliRotation(r) => write!(f, "PauliRotation({})", r),
-            Operator::Measurement(axis) => write!(f, "Measurement({})", axis),
+            Operation::PauliRotation(r) => write!(f, "PauliRotation({})", r),
+            Operation::Measurement(axis) => write!(f, "Measurement({})", axis),
         }
     }
 }
 
 // Performs the SPC translation.
-pub fn spc_translation(ops: &Vec<Operator>) -> Vec<Operator> {
+pub fn spc_translation(ops: &Vec<Operation>) -> Vec<Operation> {
     let mut result = Vec::new();
     let mut clifford_rotations = Vec::new();
     for op in ops {
         match op {
-            Operator::PauliRotation(r) => {
+            Operation::PauliRotation(r) => {
                 if r.is_clifford() {
                     clifford_rotations.push(r.clone());
                 } else {
@@ -278,15 +278,15 @@ pub fn spc_translation(ops: &Vec<Operator>) -> Vec<Operator> {
                     for clifford_rotation in clifford_rotations.iter().rev() {
                         rotation.axis.transform(&clifford_rotation.axis);
                     }
-                    result.push(Operator::PauliRotation(rotation));
+                    result.push(Operation::PauliRotation(rotation));
                 }
             }
-            Operator::Measurement(axis) => {
+            Operation::Measurement(axis) => {
                 let mut a = axis.clone();
                 for clifford_rotation in clifford_rotations.iter().rev() {
                     a.transform(&clifford_rotation.axis);
                 }
-                result.push(Operator::Measurement(a));
+                result.push(Operation::Measurement(a));
             }
         }
     }
@@ -294,12 +294,12 @@ pub fn spc_translation(ops: &Vec<Operator>) -> Vec<Operator> {
     result
 }
 
-// Given an Operator `op`, returns a pair of a list of clifford operators and the number of
+// Given an Operation `op`, returns a pair of a list of clifford operations and the number of
 // additional clocks.
-// The cliford operators are needed to translate the axis of `op` so that it consists of only
-// Z and I Pauli operators. The order of the list matters. For example, if `op`'s axis is
-// `Y`, then the clifford operators will be [Z, Y] where Z maps Y to X and Y maps X to Z.
-fn spc_compact_translation_one(op: &Operator) -> (Vec<PauliRotation>, u32) {
+// The cliford operations are needed to translate the axis of `op` so that it consists of only
+// Z and I Pauli operations. The order of the list matters. For example, if `op`'s axis is
+// `Y`, then the clifford operations will be [Z, Y] where Z maps Y to X and Y maps X to Z.
+fn spc_compact_translation_one(op: &Operation) -> (Vec<PauliRotation>, u32) {
     let mut clifford_operations: Vec<PauliRotation> = Vec::new();
     let axis = op.axis();
     let y_count = axis.iter().filter(|p| **p == Pauli::Y).count();
@@ -415,7 +415,7 @@ fn spc_compact_translation_one(op: &Operator) -> (Vec<PauliRotation>, u32) {
 }
 
 // Performs the compact SPC translation.
-pub fn spc_compact_translation(ops: &Vec<Operator>) -> Vec<(Operator, u32)> {
+pub fn spc_compact_translation(ops: &Vec<Operation>) -> Vec<(Operation, u32)> {
     let ops = spc_translation(ops);
     let mut result = Vec::new();
     let mut clifford_rotations: Vec<PauliRotation> = Vec::new();
@@ -424,20 +424,20 @@ pub fn spc_compact_translation(ops: &Vec<Operator>) -> Vec<(Operator, u32)> {
         let mut op = op.clone();
         // Apply existing clifford ops.
         match op {
-            Operator::PauliRotation(r) => {
+            Operation::PauliRotation(r) => {
                 assert!(!r.is_clifford());
                 let mut rotation = r.clone();
                 for clifford_rotation in clifford_rotations.iter() {
                     rotation.axis.transform(&clifford_rotation.axis);
                 }
-                op = Operator::PauliRotation(rotation);
+                op = Operation::PauliRotation(rotation);
             }
-            Operator::Measurement(axis) => {
+            Operation::Measurement(axis) => {
                 let mut a = axis.clone();
                 for clifford_rotation in clifford_rotations.iter() {
                     a.transform(&clifford_rotation.axis);
                 }
-                op = Operator::Measurement(a);
+                op = Operation::Measurement(a);
             }
         }
 
@@ -657,8 +657,8 @@ mod tests {
 
     #[test]
     fn test_spc_translation_cx() {
-        use Operator::Measurement as M;
-        use Operator::PauliRotation as R;
+        use Operation::Measurement as M;
+        use Operation::PauliRotation as R;
         let ops = vec![
             R(PauliRotation::new_clifford(new_axis("IZII"))),
             R(PauliRotation::new_clifford(new_axis("IIXI"))),
@@ -681,7 +681,7 @@ mod tests {
 
     #[test]
     fn test_spc_translation_tiny() {
-        use Operator::PauliRotation as R;
+        use Operation::PauliRotation as R;
         let ops = vec![
             R(PauliRotation::new_clifford(new_axis("IIIXI"))),
             R(PauliRotation::new_clifford(new_axis("IIIZI"))),
@@ -696,7 +696,7 @@ mod tests {
     }
     #[test]
     fn test_spc_compact_translation_one_trivial() {
-        use Operator::PauliRotation as R;
+        use Operation::PauliRotation as R;
 
         let (clifford_ops, additional_clocks) =
             spc_compact_translation_one(&R(PauliRotation::new_pi_over_8(new_axis("IIIIII"))));
@@ -706,7 +706,7 @@ mod tests {
 
     #[test]
     fn test_spc_compact_translation_one_with_no_additional_clocks() {
-        use Operator::PauliRotation as R;
+        use Operation::PauliRotation as R;
         let (clifford_ops, additional_clocks) =
             spc_compact_translation_one(&R(PauliRotation::new_pi_over_8(new_axis("ZZIZZZ"))));
         assert_eq!(clifford_ops.len(), 0);
@@ -715,7 +715,7 @@ mod tests {
 
     #[test]
     fn test_spc_compact_translation_one_with_xz_permutation() {
-        use Operator::PauliRotation as R;
+        use Operation::PauliRotation as R;
         {
             let (clifford_ops, additional_clocks) =
                 spc_compact_translation_one(&R(PauliRotation::new_pi_over_8(new_axis("IXIIII"))));
@@ -768,7 +768,7 @@ mod tests {
 
     #[test]
     fn test_spc_compact_translation_one_with_xy_permutation() {
-        use Operator::PauliRotation as R;
+        use Operation::PauliRotation as R;
         {
             let (clifford_ops, additional_clocks) =
                 spc_compact_translation_one(&R(PauliRotation::new_pi_over_8(new_axis("IYIIII"))));
@@ -832,7 +832,7 @@ mod tests {
 
     #[test]
     fn test_spc_compact_translation_one_qubit() {
-        use Operator::PauliRotation as R;
+        use Operation::PauliRotation as R;
 
         let ops = vec![
             R(PauliRotation::new_pi_over_8(new_axis("X"))),
@@ -855,7 +855,7 @@ mod tests {
 
     #[test]
     fn test_spc_compact_translation() {
-        use Operator::PauliRotation as R;
+        use Operation::PauliRotation as R;
         let ops = vec![
             R(PauliRotation::new_pi_over_8(new_axis("IIIXII"))),
             R(PauliRotation::new_pi_over_8(new_axis("IIIXIZ"))),

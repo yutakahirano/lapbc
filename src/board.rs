@@ -5,7 +5,7 @@ use std::{collections::HashMap, ops::Range};
 use serde::ser::SerializeStruct;
 
 use crate::mapping::{DataQubitMapping, Qubit};
-use crate::pbc::{Angle, Operator, Pauli, PauliRotation};
+use crate::pbc::{Angle, Operation, Pauli, PauliRotation};
 
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 pub struct OperationId {
@@ -192,9 +192,9 @@ impl Board {
         id
     }
 
-    pub fn schedule(&mut self, op: &Operator) -> bool {
+    pub fn schedule(&mut self, op: &Operation) -> bool {
         match op {
-            Operator::Measurement(axis) => {
+            Operation::Measurement(axis) => {
                 let mut target: Option<Qubit> = None;
                 let mut pauli_axis: Option<Pauli> = None;
                 for (i, a) in axis.iter().enumerate() {
@@ -214,7 +214,7 @@ impl Board {
 
                 self.schedule_mesuarement(target.unwrap(), pauli_axis.unwrap())
             }
-            Operator::PauliRotation(rotation) => self.schedule_rotation(rotation),
+            Operation::PauliRotation(rotation) => self.schedule_rotation(rotation),
         }
     }
 
@@ -1608,14 +1608,14 @@ mod tests {
         board.set_occupancy(1, 0, 1, LatticeSurgery(id));
 
         // Rejected because the qubit is already in operation at cycle 0.
-        assert!(!board.schedule(&Operator::PauliRotation(PauliRotation {
+        assert!(!board.schedule(&Operation::PauliRotation(PauliRotation {
             angle: Angle::PiOver4,
             axis: new_axis("XII")
         })));
 
         board.cycle = 1;
         // Rejected because the ancilla qubit at (1, 0) is already used.
-        assert!(!board.schedule(&Operator::PauliRotation(PauliRotation {
+        assert!(!board.schedule(&Operation::PauliRotation(PauliRotation {
             angle: Angle::PiOver4,
             axis: new_axis("XII")
         })));
@@ -2004,7 +2004,7 @@ mod tests {
         board.set_occupancy(0, 0, 0, DataQubitInOperation(id));
         board.set_cycle_after_last_operation_at(Qubit::new(0), 1);
 
-        assert!(!board.schedule(&Operator::PauliRotation(PauliRotation {
+        assert!(!board.schedule(&Operation::PauliRotation(PauliRotation {
             angle: Angle::PiOver4,
             axis: new_axis("XX")
         })));
@@ -2016,7 +2016,7 @@ mod tests {
         mapping.map(Qubit::new(0), 0, 0);
         mapping.map(Qubit::new(1), 1, 1);
         let mut board = new_board(mapping, 3);
-        assert!(!board.schedule(&Operator::PauliRotation(PauliRotation {
+        assert!(!board.schedule(&Operation::PauliRotation(PauliRotation {
             angle: Angle::PiOver4,
             axis: new_axis("XX")
         })));
@@ -2033,7 +2033,7 @@ mod tests {
         board.ensure_board_occupancy(3);
         let id = board.issue_operation_id();
         board.set_occupancy(1, 0, 2, LatticeSurgery(id));
-        assert!(!board.schedule(&Operator::PauliRotation(PauliRotation {
+        assert!(!board.schedule(&Operation::PauliRotation(PauliRotation {
             angle: Angle::PiOver4,
             axis: new_axis("XX")
         })));
@@ -2049,7 +2049,7 @@ mod tests {
         let mut board = new_board(mapping, 3);
         board.ensure_board_occupancy(3);
 
-        assert!(!board.schedule(&Operator::PauliRotation(PauliRotation {
+        assert!(!board.schedule(&Operation::PauliRotation(PauliRotation {
             angle: Angle::PiOver4,
             axis: new_axis("ZX")
         })));
@@ -2068,7 +2068,7 @@ mod tests {
         let id = board.issue_operation_id();
         board.set_occupancy(1, 0, 3, LatticeSurgery(id));
 
-        assert!(!board.schedule(&Operator::PauliRotation(PauliRotation {
+        assert!(!board.schedule(&Operation::PauliRotation(PauliRotation {
             angle: Angle::PiOver4,
             axis: new_axis("XX")
         })));
@@ -2087,7 +2087,7 @@ mod tests {
         board.set_occupancy(0, 1, 3, LatticeSurgery(id));
         board.set_occupancy(1, 1, 3, LatticeSurgery(id));
 
-        assert!(!board.schedule(&Operator::PauliRotation(PauliRotation {
+        assert!(!board.schedule(&Operation::PauliRotation(PauliRotation {
             angle: Angle::PiOver4,
             axis: new_axis("ZZ")
         })));
@@ -2100,7 +2100,7 @@ mod tests {
         mapping.map(Qubit::new(1), 0, 2);
         let mut board = new_board(mapping, 3);
 
-        assert!(!board.schedule(&Operator::PauliRotation(PauliRotation {
+        assert!(!board.schedule(&Operation::PauliRotation(PauliRotation {
             angle: Angle::PiOver4,
             axis: new_axis("YY")
         })));
@@ -2123,7 +2123,7 @@ mod tests {
         let id = OperationId { id: 0 };
 
         board.cycle = 8;
-        assert!(board.schedule(&Operator::PauliRotation(PauliRotation {
+        assert!(board.schedule(&Operation::PauliRotation(PauliRotation {
             angle: Angle::PiOver4,
             axis: new_axis("XZ")
         })));
@@ -2176,7 +2176,7 @@ mod tests {
         board.set_occupancy(1, 2, 4, YInitialization(dummy_id));
         let id = OperationId { id: 0 };
 
-        assert!(board.schedule(&Operator::PauliRotation(PauliRotation {
+        assert!(board.schedule(&Operation::PauliRotation(PauliRotation {
             angle: Angle::PiOver4,
             axis: new_axis("XZ")
         })));
@@ -2227,7 +2227,7 @@ mod tests {
         mapping.map(Qubit::new(1), 0, 2);
         let mut board = new_board(mapping, 3);
 
-        assert!(board.schedule(&Operator::PauliRotation(PauliRotation {
+        assert!(board.schedule(&Operation::PauliRotation(PauliRotation {
             angle: Angle::PiOver4,
             axis: new_axis("YY")
         })));
@@ -2281,13 +2281,13 @@ mod tests {
         let mut board = Board::new(mapping, &conf);
 
         board.set_cycle_after_last_operation_at(q, 1000);
-        assert!(!board.schedule(&Operator::PauliRotation(PauliRotation {
+        assert!(!board.schedule(&Operation::PauliRotation(PauliRotation {
             angle: Angle::PiOver8,
             axis: new_axis("Z")
         })));
 
         board.cycle = 999;
-        assert!(!board.schedule(&Operator::PauliRotation(PauliRotation {
+        assert!(!board.schedule(&Operation::PauliRotation(PauliRotation {
             angle: Angle::PiOver8,
             axis: new_axis("Z")
         })));
@@ -2315,12 +2315,12 @@ mod tests {
         board.set_occupancy(1, 1, 0, YMeasurement(dummy_id));
         board.set_occupancy(0, 1, 0, YMeasurement(dummy_id));
         board.set_occupancy(0, 3, 0, YInitialization(dummy_id));
-        assert!(!board.schedule(&Operator::PauliRotation(PauliRotation {
+        assert!(!board.schedule(&Operation::PauliRotation(PauliRotation {
             angle: Angle::PiOver8,
             axis: new_axis("XI")
         })));
 
-        assert!(!board.schedule(&Operator::PauliRotation(PauliRotation {
+        assert!(!board.schedule(&Operation::PauliRotation(PauliRotation {
             angle: Angle::PiOver8,
             axis: new_axis("IZ")
         })));

@@ -1,16 +1,16 @@
 use std::fmt;
 
 use super::pbc::Axis;
-use super::pbc::Operator;
+use super::pbc::Operation;
 use super::pbc::Pauli;
 use super::pbc::PauliRotation;
 
-pub fn lapbc_translation(ops: &Vec<Operator>) -> Vec<Operator> {
+pub fn lapbc_translation(ops: &Vec<Operation>) -> Vec<Operation> {
     let mut result = Vec::new();
     let mut clifford_rotations = Vec::new();
     for op in ops {
         match op {
-            Operator::PauliRotation(r) => {
+            Operation::PauliRotation(r) => {
                 if op.is_single_qubit_clifford() {
                     clifford_rotations.push(r.clone());
                 } else {
@@ -18,15 +18,15 @@ pub fn lapbc_translation(ops: &Vec<Operator>) -> Vec<Operator> {
                     for clifford_rotation in clifford_rotations.iter().rev() {
                         rotation.axis.transform(&clifford_rotation.axis);
                     }
-                    result.push(Operator::PauliRotation(rotation));
+                    result.push(Operation::PauliRotation(rotation));
                 }
             }
-            Operator::Measurement(axis) => {
+            Operation::Measurement(axis) => {
                 let mut a = axis.clone();
                 for clifford_rotation in clifford_rotations.iter().rev() {
                     a.transform(&clifford_rotation.axis);
                 }
-                result.push(Operator::Measurement(a));
+                result.push(Operation::Measurement(a));
             }
         }
     }
@@ -84,7 +84,7 @@ impl fmt::Display for AxisPermutation {
     }
 }
 
-fn lapbc_compact_axis_permutation(commuting_ops: &[&Operator]) -> AxisPermutation {
+fn lapbc_compact_axis_permutation(commuting_ops: &[&Operation]) -> AxisPermutation {
     let mut perm = AxisPermutation::new_empty();
 
     if commuting_ops.is_empty() {
@@ -216,42 +216,42 @@ fn lapbc_compact_axis_permutation(commuting_ops: &[&Operator]) -> AxisPermutatio
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum LapbcCompactOperator {
-    Operator(Operator),
+pub enum LapbcCompactOperation {
+    Operation(Operation),
     AxisPermutation(AxisPermutation),
     #[allow(dead_code)]
     Noop,
 }
 
-impl std::fmt::Display for LapbcCompactOperator {
+impl std::fmt::Display for LapbcCompactOperation {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        use LapbcCompactOperator::*;
+        use LapbcCompactOperation::*;
         match self {
-            Operator(r) => write!(f, "{}", r),
+            Operation(r) => write!(f, "{}", r),
             AxisPermutation(axis) => write!(f, "AxisPermutation({})", axis),
             Noop => write!(f, "Noop"),
         }
     }
 }
 
-impl LapbcCompactOperator {
+impl LapbcCompactOperation {
     pub fn clocks(&self) -> u32 {
         match self {
-            LapbcCompactOperator::Operator(_) => 1,
-            LapbcCompactOperator::AxisPermutation(perm) => {
+            LapbcCompactOperation::Operation(_) => 1,
+            LapbcCompactOperation::AxisPermutation(perm) => {
                 if perm.rotations.iter().any(|r| r.axis.has_y()) {
                     3
                 } else {
                     2
                 }
             }
-            LapbcCompactOperator::Noop => 1,
+            LapbcCompactOperation::Noop => 1,
         }
     }
 }
 
 #[allow(dead_code)]
-pub fn lapbc_compact_translation(ops: &Vec<Operator>) -> Vec<LapbcCompactOperator> {
+pub fn lapbc_compact_translation(ops: &Vec<Operation>) -> Vec<LapbcCompactOperation> {
     let mut ops = lapbc_translation(ops);
     if ops.is_empty() {
         return Vec::new();
@@ -284,7 +284,7 @@ pub fn lapbc_compact_translation(ops: &Vec<Operator>) -> Vec<LapbcCompactOperato
             if op.axis().has_only_z_and_i() {
                 done[*i] = true;
                 count += 1;
-                result.push(LapbcCompactOperator::Operator(op.clone()));
+                result.push(LapbcCompactOperation::Operation(op.clone()));
                 found = true;
             }
         }
@@ -301,23 +301,23 @@ pub fn lapbc_compact_translation(ops: &Vec<Operator>) -> Vec<LapbcCompactOperato
                 continue;
             }
             match op {
-                Operator::PauliRotation(r) => {
+                Operation::PauliRotation(r) => {
                     let mut rotation = r.clone();
                     for clifford_rotation in clifford_rotations.iter() {
                         rotation.axis.transform(&clifford_rotation.axis);
                     }
-                    *op = Operator::PauliRotation(rotation);
+                    *op = Operation::PauliRotation(rotation);
                 }
-                Operator::Measurement(axis) => {
+                Operation::Measurement(axis) => {
                     let mut a = axis.clone();
                     for clifford_rotation in clifford_rotations.iter() {
                         a.transform(&clifford_rotation.axis);
                     }
-                    *op = Operator::Measurement(a);
+                    *op = Operation::Measurement(a);
                 }
             }
         }
-        result.push(LapbcCompactOperator::AxisPermutation(perm));
+        result.push(LapbcCompactOperation::AxisPermutation(perm));
     }
 
     result
@@ -343,8 +343,8 @@ mod tests {
 
     #[test]
     fn test_lapbc_translation_cx() {
-        use Operator::Measurement as M;
-        use Operator::PauliRotation as R;
+        use Operation::Measurement as M;
+        use Operation::PauliRotation as R;
         let ops = vec![
             R(PauliRotation::new_clifford(new_axis("IZII"))),
             R(PauliRotation::new_clifford(new_axis("IIXI"))),
@@ -368,7 +368,7 @@ mod tests {
 
     #[test]
     fn test_lapbc_translation_tiny() {
-        use Operator::PauliRotation as R;
+        use Operation::PauliRotation as R;
         let ops = vec![
             R(PauliRotation::new_clifford(new_axis("IIIXI"))),
             R(PauliRotation::new_clifford(new_axis("IIIZI"))),
@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn test_lapbc_compact_axis_permutation_1() {
-        use Operator::PauliRotation as R;
+        use Operation::PauliRotation as R;
         {
             let ops = [R(PauliRotation::new_clifford(new_axis("I")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn test_lapbc_compact_axis_permutation_2() {
-        use Operator::PauliRotation as R;
+        use Operation::PauliRotation as R;
         {
             let ops = [R(PauliRotation::new_clifford(new_axis("IZ")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
@@ -475,7 +475,7 @@ mod tests {
 
     #[test]
     fn test_lapbc_compact_axis_permutation_odd() {
-        use Operator::PauliRotation as R;
+        use Operation::PauliRotation as R;
         {
             let ops = [R(PauliRotation::new_clifford(new_axis("IZZ")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
@@ -605,7 +605,7 @@ mod tests {
 
     #[test]
     fn test_lapbc_compact_axis_permutation_even() {
-        use Operator::PauliRotation as R;
+        use Operation::PauliRotation as R;
         {
             let ops = [R(PauliRotation::new_clifford(new_axis("IZZI")))];
             let perm = lapbc_compact_axis_permutation(ops.iter().collect::<Vec<_>>().as_slice());
@@ -751,9 +751,9 @@ mod tests {
 
     #[test]
     fn test_lapbc_compact_translation_trivial() {
-        use LapbcCompactOperator::Operator as O;
-        use Operator::Measurement as M;
-        use Operator::PauliRotation as R;
+        use LapbcCompactOperation::Operation as O;
+        use Operation::Measurement as M;
+        use Operation::PauliRotation as R;
 
         let ops = vec![
             R(PauliRotation::new_clifford(new_axis("IZIZ"))),
@@ -777,10 +777,10 @@ mod tests {
 
     #[test]
     fn test_lapbc_compact_translation_tiny() {
-        use LapbcCompactOperator::AxisPermutation as A;
-        use LapbcCompactOperator::Operator as O;
-        use Operator::Measurement as M;
-        use Operator::PauliRotation as R;
+        use LapbcCompactOperation::AxisPermutation as A;
+        use LapbcCompactOperation::Operation as O;
+        use Operation::Measurement as M;
+        use Operation::PauliRotation as R;
 
         let ops = vec![
             R(PauliRotation::new_pi_over_8(new_axis("XIII"))),
@@ -816,10 +816,10 @@ mod tests {
 
     #[test]
     fn test_lapbc_compact_translation_small() {
-        use LapbcCompactOperator::AxisPermutation as A;
-        use LapbcCompactOperator::Operator as O;
-        use Operator::Measurement as M;
-        use Operator::PauliRotation as R;
+        use LapbcCompactOperation::AxisPermutation as A;
+        use LapbcCompactOperation::Operation as O;
+        use Operation::Measurement as M;
+        use Operation::PauliRotation as R;
 
         let ops = vec![
             R(PauliRotation::new_pi_over_8(new_axis("XIIIII"))),
