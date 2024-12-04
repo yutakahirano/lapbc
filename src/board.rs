@@ -941,12 +941,10 @@ impl Board {
         let y_measurement_cost = y_measurement_cost(distance);
         let correction_range = cycle + distance..cycle + distance + y_measurement_cost;
 
-        // `(cx, cy)` is the closet to the target data qubit in `distillation_area`. We can move a
-        // magic state distilled at any position in `distillation_area` to `(cx, cy)` by using
-        // lattice surgery, so as to perform a potential correction Y measurement there.
-        let (cx, cy) = distillation_area[0];
-        if !self.is_vacant(cx, cy, correction_range.clone()) {
-            return false;
+        for &(cx, cy) in distillation_area {
+            if !self.is_vacant(cx, cy, correction_range.clone()) {
+                return false;
+            }
         }
 
         let id = self.issue_operation_id();
@@ -983,7 +981,10 @@ impl Board {
             );
         }
 
-        self.set_occupancy_range(cx, cy, correction_range, BoardOccupancy::YMeasurement(id));
+        for &(cx, cy) in distillation_area {
+            let occupancy = BoardOccupancy::YMeasurement(id);
+            self.set_occupancy_range(cx, cy, correction_range.clone(), occupancy);
+        }
         self.operations
             .push(OperationWithAdditionalData::PiOver8Rotation {
                 id,
@@ -2612,7 +2613,7 @@ mod tests {
         assert!(board.is_occupancy(0, 3, 0..21, Vacant));
         assert!(board.is_occupancy(1, 0, 0..15, MagicStateDistillation(id)));
         assert!(board.is_occupancy(1, 0, 15..18, LatticeSurgery(id)));
-        assert!(board.is_occupancy(1, 0, 18..21, Vacant));
+        assert!(board.is_occupancy(1, 0, 18..21, YMeasurement(id)));
         assert!(board.is_occupancy(1, 1, 0..21, Vacant));
         assert!(board.is_occupancy(1, 2, 0..21, Vacant));
         assert!(board.is_occupancy(1, 3, 0..21, Vacant));
@@ -2693,7 +2694,7 @@ mod tests {
         assert!(board.is_occupancy(2, 0, 0..21, Vacant));
         assert!(board.is_occupancy(2, 1, 0..15, MagicStateDistillation(id)));
         assert!(board.is_occupancy(2, 1, 15..18, LatticeSurgery(id)));
-        assert!(board.is_occupancy(2, 1, 18..21, Vacant));
+        assert!(board.is_occupancy(2, 1, 18..21, YMeasurement(id)));
         assert!(board.is_occupancy(2, 2, 0..21, Vacant));
         assert!(board.is_occupancy(2, 3, 0..21, Vacant));
         assert!(board.has_schedule_at_or_after(Qubit::new(0), 17));
@@ -2776,7 +2777,7 @@ mod tests {
         assert!(board.is_occupancy(1, 1, 13..16, Vacant));
         assert!(board.is_occupancy(1, 2, 0..10, MagicStateDistillation(id)));
         assert!(board.is_occupancy(1, 2, 10..13, LatticeSurgery(id)));
-        assert!(board.is_occupancy(1, 2, 13..16, Vacant));
+        assert!(board.is_occupancy(1, 2, 13..16, YMeasurement(id)));
         assert!(board.is_occupancy(1, 3, 0..16, Vacant));
         assert!(board.is_occupancy(2, 0, 0..16, Vacant));
         assert!(board.is_occupancy(2, 1, 0..10, MagicStateDistillation(id)));
@@ -2784,7 +2785,7 @@ mod tests {
         assert!(board.is_occupancy(2, 1, 13..16, YMeasurement(id)));
         assert!(board.is_occupancy(2, 2, 0..10, MagicStateDistillation(id)));
         assert!(board.is_occupancy(2, 2, 10..13, LatticeSurgery(id)));
-        assert!(board.is_occupancy(2, 2, 13..16, Vacant));
+        assert!(board.is_occupancy(2, 2, 13..16, YMeasurement(id)));
         assert!(board.is_occupancy(2, 3, 0..16, Vacant));
         assert!(board.has_schedule_at_or_after(Qubit::new(0), 12));
         assert!(!board.has_schedule_at_or_after(Qubit::new(0), 13));
