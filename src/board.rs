@@ -566,6 +566,68 @@ impl Board {
         true
     }
 
+    fn neighbors_with_xz_axis(
+        x: u32,
+        y: u32,
+        axis: Pauli,
+        available: &AncillaAvailability,
+    ) -> Vec<(u32, u32)> {
+        match axis {
+            Pauli::I | Pauli::Y => {
+                unreachable!();
+            }
+            Pauli::X => {
+                let mut points = vec![];
+                if x > 0 && available[(x - 1, y)] {
+                    points.push((x - 1, y));
+                }
+                if x + 1 < available.width() && available[(x + 1, y)] {
+                    points.push((x + 1, y));
+                }
+                points
+            }
+            Pauli::Z => {
+                let mut points = vec![];
+                if y > 0 && available[(x, y - 1)] {
+                    points.push((x, y - 1));
+                }
+                if y + 1 < available.height() && available[(x, y + 1)] {
+                    points.push((x, y + 1));
+                }
+                points
+            }
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn neighbors_with_y_axis(
+        x: u32,
+        y: u32,
+        available: &AncillaAvailability,
+    ) -> Vec<((u32, u32), (u32, u32), (u32, u32))> {
+        let mut result = vec![];
+        let width = available.width();
+        let height = available.height();
+        let mut push = |p1, p2, p3| {
+            if available[p1] && available[p2] && available[p3] {
+                result.push((p1, p2, p3));
+            }
+        };
+        if x > 0 && y > 0 {
+            push((x - 1, y), (x - 1, y - 1), (x, y - 1));
+        }
+        if x > 0 && y + 1 < height {
+            push((x - 1, y), (x - 1, y + 1), (x, y + 1));
+        }
+        if x + 1 < width && y > 0 {
+            push((x + 1, y), (x + 1, y - 1), (x, y - 1));
+        }
+        if x + 1 < width && y + 1 < height {
+            push((x + 1, y), (x + 1, y + 1), (x, y + 1));
+        }
+        result
+    }
+
     // Returns a path between `(x1, y1)` and `(x2, y2)`.
     // The two endpoints require specific connectivity constraints specified by `p1` and `p2`.
     // `p1` and `p2` are either Pauli::X, Pauli::Y, or Pauli::Z.
@@ -588,39 +650,18 @@ impl Board {
             Pauli::I => {
                 unreachable!("path_between: Pauli::I");
             }
-            Pauli::X => {
-                if x1 > 0 && available[(x1 - 1, y1)] {
-                    q.push_back(((x1 - 1, y1), (x1, y1)));
-                }
-                if x1 + 1 < width && available[(x1 + 1, y1)] {
-                    q.push_back(((x1 + 1, y1), (x1, y1)));
-                }
-            }
-            Pauli::Z => {
-                if y1 > 0 && available[(x1, y1 - 1)] {
-                    q.push_back(((x1, y1 - 1), (x1, y1)));
-                }
-                if y1 + 1 < height && available[(x1, y1 + 1)] {
-                    q.push_back(((x1, y1 + 1), (x1, y1)));
+            Pauli::X | Pauli::Z => {
+                for (x, y) in Self::neighbors_with_xz_axis(x1, y1, p1, available) {
+                    q.push_back(((x, y), (x1, y1)));
                 }
             }
             Pauli::Y => {
-                // We use this to avoid integer underflow. In any case, a value with underflow will
-                // not be used because it will be filtered out by `cond1` and `cond2`.
-                let pre = |x: u32| x.wrapping_sub(1);
-                let mut run = |cond1, cond2, p1, p2, p3| {
-                    if cond1 && cond2 && available[p1] && available[p2] && available[p3] {
-                        q.push_back((p1, (x1, y1)));
-                        q.push_back((p2, (x1, y1)));
-                        q.push_back((p3, (x1, y1)));
-                        src_y_history.push([p1, p2, p3]);
-                    }
-                };
-
-                run(x1 > 0, y1 > 0, (pre(x1), y1), (pre(x1), pre(y1)), (x1, pre(y1)));
-                run(x1 > 0, y1 + 1 < height, (pre(x1), y1), (pre(x1), y1 + 1), (x1, y1 + 1));
-                run(x1 + 1 < width, y1 > 0, (x1 + 1, y1), (x1 + 1, pre(y1)), (x1, pre(y1)));
-                run(x1 + 1 < width, y1 + 1 < height, (x1 + 1, y1), (x1 + 1, y1 + 1), (x1, y1 + 1));
+                for (p1, p2, p3) in Self::neighbors_with_y_axis(x1, y1, available) {
+                    q.push_back((p1, (x1, y1)));
+                    q.push_back((p2, (x1, y1)));
+                    q.push_back((p3, (x1, y1)));
+                    src_y_history.push([p1, p2, p3]);
+                }
             }
         }
 
@@ -629,38 +670,18 @@ impl Board {
             Pauli::I => {
                 unreachable!("path_between: Pauli::I");
             }
-            Pauli::X => {
-                if x2 > 0 && available[(x2 - 1, y2)] {
-                    destinations.push((x2 - 1, y2));
-                }
-                if x2 + 1 < width && available[(x2 + 1, y2)] {
-                    destinations.push((x2 + 1, y2));
-                }
-            }
-            Pauli::Z => {
-                if y2 > 0 && available[(x2, y2 - 1)] {
-                    destinations.push((x2, y2 - 1));
-                }
-                if y2 + 1 < height && available[(x2, y2 + 1)] {
-                    destinations.push((x2, y2 + 1));
+            Pauli::X | Pauli::Z => {
+                for (x, y) in Self::neighbors_with_xz_axis(x2, y2, p2, available) {
+                    destinations.push((x, y));
                 }
             }
             Pauli::Y => {
-                // We use this to avoid integer underflow. In any case, a value with underflow will
-                // not be used because it will be filtered out by `cond1` and `cond2`.
-                let pre = |x: u32| x.wrapping_sub(1);
-                let mut run = |cond1, cond2, p1, p2, p3| {
-                    if cond1 && cond2 && available[p1] && available[p2] && available[p3] {
-                        destinations.push(p1);
-                        destinations.push(p2);
-                        destinations.push(p3);
-                        dest_y_history.push([p1, p2, p3]);
-                    }
-                };
-                run(x2 > 0, y2 > 0, (pre(x2), y2), (pre(x2), pre(y2)), (x2, pre(y2)));
-                run(x2 > 0, y2 + 1 < height, (pre(x2), y2), (pre(x2), y2 + 1), (x2, y2 + 1));
-                run(x2 + 1 < width, y2 > 0, (x2 + 1, y2), (x2 + 1, pre(y2)), (x2, pre(y2)));
-                run(x2 + 1 < width, y2 + 1 < height, (x2 + 1, y2), (x2 + 1, y2 + 1), (x2, y2 + 1));
+                for (p1, p2, p3) in Self::neighbors_with_y_axis(x2, y2, available) {
+                    destinations.push(p1);
+                    destinations.push(p2);
+                    destinations.push(p3);
+                    dest_y_history.push([p1, p2, p3]);
+                }
             }
         }
 
