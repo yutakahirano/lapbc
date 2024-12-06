@@ -15,8 +15,8 @@ pub struct OperationId {
 
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Serialize)]
 pub struct Position {
-    x: u32,
-    y: u32,
+    pub x: u32,
+    pub y: u32,
 }
 
 struct Targets<'a> {
@@ -155,6 +155,12 @@ pub enum BoardOccupancy {
     PiOver8RotationBlock(OperationId),
 }
 
+impl BoardOccupancy {
+    pub fn is_vacant_or_idle(&self) -> bool {
+        matches!(self, BoardOccupancy::Vacant | BoardOccupancy::IdleDataQubit)
+    }
+}
+
 impl serde::Serialize for BoardOccupancy {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -243,6 +249,11 @@ struct AncillaAvailability {
 }
 
 impl OperationId {
+    #[allow(dead_code)]
+    pub fn new(id: u32) -> Self {
+        Self { id }
+    }
+
     fn increment(&mut self) {
         self.id += 1;
     }
@@ -1334,9 +1345,7 @@ impl Board {
         while cycle < (self.occupancy.len() / size) as u32 {
             for x in 0..self.conf.width {
                 for y in 0..self.conf.height {
-                    let occupancy = self.get_occupancy(x, y, cycle);
-                    use BoardOccupancy::*;
-                    if occupancy != Vacant && occupancy != IdleDataQubit {
+                    if !self.get_occupancy(x, y, cycle).is_vacant_or_idle() {
                         last_end_cycle = cycle + 1;
                     }
                 }
@@ -1393,14 +1402,13 @@ impl Board {
     }
 
     fn set_occupancy(&mut self, x: u32, y: u32, cycle: u32, occupancy: BoardOccupancy) {
-        use BoardOccupancy::*;
         assert!(x < self.conf.width);
         assert!(y < self.conf.height);
         let size = (self.conf.width * self.conf.height) as usize;
         assert_eq!(self.occupancy.len() % size, 0);
         assert!(cycle < (self.occupancy.len() / size) as u32);
         let index = (cycle * self.conf.width * self.conf.height + y * self.conf.width + x) as usize;
-        assert!(self.occupancy[index] == Vacant || self.occupancy[index] == IdleDataQubit);
+        assert!(self.occupancy[index].is_vacant_or_idle());
 
         self.occupancy[index] = occupancy;
     }
