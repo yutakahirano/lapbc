@@ -3,11 +3,45 @@ use std::ops::{Index, IndexMut};
 
 use rand::{thread_rng, Rng};
 
-use crate::board::BoardOccupancy;
 use crate::board::Configuration;
 use crate::board::Map2D;
 use crate::board::OperationId;
 use crate::board::{Board, OperationWithAdditionalData};
+use crate::board::{BoardOccupancy, Position};
+
+struct Range2D {
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+}
+
+fn range_2d(width: u32, height: u32) -> Range2D {
+    Range2D {
+        width,
+        height,
+        x: 0,
+        y: 0,
+    }
+}
+
+impl Iterator for Range2D {
+    type Item = (u32, u32);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.y == self.height {
+            return None;
+        }
+
+        let ret = (self.x, self.y);
+        self.x += 1;
+        if self.x == self.width {
+            self.x = 0;
+            self.y += 1;
+        }
+        Some(ret)
+    }
+}
 
 pub struct OccupancyMap {
     width: u32,
@@ -57,6 +91,16 @@ impl OccupancyMap {
     }
 }
 
+enum Blocking {
+    // No blocking is required.
+    None,
+    // All magic state distillation operations failed, and we need to retry them.
+    DistillationFailure,
+    // A lattice surgery operation is blocked by arbitrary operation running on any of the qubits
+    // on which it is performed.
+    LatticeSurgeryIsWaiting,
+}
+
 pub struct Runner {
     operations: HashMap<OperationId, OperationWithAdditionalData>,
     schedule: OccupancyMap,
@@ -65,13 +109,25 @@ pub struct Runner {
 
 impl Runner {
     pub fn new(board: &Board) -> Self {
+        let mut end_cycle_at = Map2D::new_with_value(board.width(), board.height(), 0);
+        let schedule = OccupancyMap::new(board);
+        for (x, y) in range_2d(board.width(), board.height()) {
+            let mut cycle = schedule.end_cycle();
+            while cycle > 0 {
+                if !schedule[(x, y, cycle - 1)].is_vacant_or_idle() {
+                    break;
+                }
+                cycle -= 1;
+            }
+            end_cycle_at[(x, y)] = cycle;
+        }
         Runner {
             operations: board
                 .operations()
                 .iter()
                 .map(|op| (op.id(), op.clone()))
                 .collect(),
-            schedule: OccupancyMap::new(board),
+            schedule,
             conf: board.configuration().clone(),
         }
     }
@@ -259,6 +315,19 @@ mod tests {
         schedule: OccupancyMap,
         conf: &Configuration,
     ) -> Runner {
+        let width = schedule.width;
+        let height = schedule.height;
+        let mut end_cycle_at = Map2D::new_with_value(width, height, 0);
+        for (x, y) in range_2d(width, height) {
+            let mut cycle = schedule.end_cycle();
+            while cycle > 0 {
+                if !schedule[(x, y, cycle - 1)].is_vacant_or_idle() {
+                    break;
+                }
+                cycle -= 1;
+            }
+            end_cycle_at[(x, y)] = cycle;
+        }
         Runner {
             operations: operations.iter().map(|op| (op.id(), op.clone())).collect(),
             schedule,
@@ -302,6 +371,10 @@ mod tests {
         }
 
         map
+    }
+
+    fn p(x: u32, y: u32) -> Position {
+        Position { x, y }
     }
 
     #[test]
@@ -358,7 +431,8 @@ mod tests {
         let id = OperationId::new(0);
         let operations = vec![OperationWithAdditionalData::PiOver4Rotation {
             id,
-            targets: vec![(Position { x: 0, y: 0 }, Pauli::Z)],
+            targets: vec![(p(0, 0), Pauli::Z)],
+            ancilla_qubits: vec![p(0, 1)],
         }];
 
         let mut schedule = new_occupancy_map(
@@ -401,7 +475,8 @@ mod tests {
             id,
             num_distillations: 3,
             num_distillations_on_retry: 3,
-            targets: vec![(Position { x: 0, y: 0 }, Pauli::Z)],
+            targets: vec![(p(0, 0), Pauli::Z)],
+            ancilla_qubits: vec![p(0, 1), p(0, 2), p(1, 2)],
         }];
 
         let mut schedule = new_occupancy_map(
@@ -451,7 +526,8 @@ mod tests {
             id,
             num_distillations: 3,
             num_distillations_on_retry: 3,
-            targets: vec![(Position { x: 0, y: 0 }, Pauli::Z)],
+            targets: vec![(p(0, 0), Pauli::Z)],
+            ancilla_qubits: vec![p(0, 1), p(0, 2), p(1, 2)],
         }];
 
         let mut schedule = new_occupancy_map(
@@ -502,7 +578,8 @@ mod tests {
             id,
             num_distillations: 3,
             num_distillations_on_retry: 2,
-            targets: vec![(Position { x: 0, y: 0 }, Pauli::Z)],
+            targets: vec![(p(0, 0), Pauli::Z)],
+            ancilla_qubits: vec![p(0, 1), p(0, 2)],
         }];
 
         let mut schedule = new_occupancy_map(
@@ -563,17 +640,20 @@ mod tests {
                 id: id0,
                 num_distillations: 3,
                 num_distillations_on_retry: 3,
-                targets: vec![(Position { x: 0, y: 0 }, Pauli::Z)],
+                targets: vec![(p(0, 0), Pauli::Z)],
+                ancilla_qubits: vec![p(0, 1), p(1, 1), p(0, 2)],
             },
             OperationWithAdditionalData::PiOver4Rotation {
                 id: id1,
-                targets: vec![(Position { x: 2, y: 2 }, Pauli::Z)],
+                targets: vec![(p(2, 2), Pauli::Z)],
+                ancilla_qubits: vec![p(1, 1), p(2, 1), p(2, 2)],
             },
             OperationWithAdditionalData::PiOver8Rotation {
                 id: id2,
                 num_distillations: 3,
                 num_distillations_on_retry: 2,
-                targets: vec![(Position { x: 0, y: 0 }, Pauli::X)],
+                targets: vec![(p(0, 0), Pauli::X)],
+                ancilla_qubits: vec![p(1, 0), p(2, 0), p(2, 1)],
             },
         ];
 
@@ -644,15 +724,18 @@ mod tests {
                 id: id0,
                 num_distillations: 1,
                 num_distillations_on_retry: 1,
-                targets: vec![(Position { x: 1, y: 1 }, Pauli::Z)],
+                targets: vec![(p(1, 1), Pauli::Z)],
+                ancilla_qubits: vec![p(1, 2)],
             },
             OperationWithAdditionalData::PiOver4Rotation {
                 id: id1,
-                targets: vec![(Position { x: 1, y: 1 }, Pauli::X)],
+                targets: vec![(p(1, 1), Pauli::X)],
+                ancilla_qubits: vec![p(0, 1)],
             },
             OperationWithAdditionalData::PiOver4Rotation {
                 id: id2,
-                targets: vec![(Position { x: 1, y: 1 }, Pauli::X)],
+                targets: vec![(p(1, 1), Pauli::X)],
+                ancilla_qubits: vec![p(2, 1)],
             },
         ];
 
@@ -708,11 +791,13 @@ mod tests {
                 id: id0,
                 num_distillations: 3,
                 num_distillations_on_retry: 3,
-                targets: vec![(Position { x: 0, y: 0 }, Pauli::Z)],
+                targets: vec![(p(0, 0), Pauli::Z)],
+                ancilla_qubits: vec![p(0, 1), p(1, 1), p(0, 2)],
             },
             OperationWithAdditionalData::PiOver4Rotation {
                 id: id1,
-                targets: vec![(Position { x: 2, y: 2 }, Pauli::Z)],
+                targets: vec![(p(2, 2), Pauli::Z)],
+                ancilla_qubits: vec![p(1, 1), p(2, 1)],
             },
         ];
 
@@ -773,14 +858,17 @@ mod tests {
                 num_distillations: 1,
                 num_distillations_on_retry: 1,
                 targets: vec![(Position { x: 1, y: 1 }, Pauli::Z)],
+                ancilla_qubits: vec![p(1, 2)],
             },
             OperationWithAdditionalData::PiOver4Rotation {
                 id: id1,
                 targets: vec![(Position { x: 1, y: 1 }, Pauli::X)],
+                ancilla_qubits: vec![p(0, 1)],
             },
             OperationWithAdditionalData::PiOver4Rotation {
                 id: id2,
                 targets: vec![(Position { x: 1, y: 1 }, Pauli::X)],
+                ancilla_qubits: vec![p(2, 1)],
             },
         ];
 
