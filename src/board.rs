@@ -66,7 +66,8 @@ pub enum OperationWithAdditionalData {
     PiOver8Rotation {
         id: OperationId,
         targets: Vec<(Position, Pauli)>,
-        ancilla_qubits: Vec<Position>,
+        routing_qubits: Vec<Position>,
+        distillation_qubits: Vec<Position>,
         num_distillations: u32,
         num_distillations_on_retry: u32,
     },
@@ -124,16 +125,18 @@ impl serde::Serialize for OperationWithAdditionalData {
             PiOver8Rotation {
                 id,
                 targets,
-                ancilla_qubits,
+                routing_qubits,
+                distillation_qubits,
                 num_distillations,
                 num_distillations_on_retry,
             } => {
                 put!(
                     "PI_OVER_8_ROTATION",
-                    5,
+                    6,
                     ("id", id.id),
                     ("targets", Targets::new(targets)),
-                    ("ancilla_qubits", ancilla_qubits),
+                    ("routing_qubits", routing_qubits),
+                    ("distillation_qubits", distillation_qubits),
                     ("num_distillations", num_distillations),
                     ("num_distillations_on_retry", num_distillations_on_retry)
                 )
@@ -1050,16 +1053,18 @@ impl Board {
             let occupancy = BoardOccupancy::YMeasurement(id);
             self.set_occupancy_range(cx, cy, correction_range.clone(), occupancy);
         }
-        let ancilla_qubits = routing_qubits
-            .iter()
-            .chain(distillation_area.iter())
-            .map(|&(x, y)| Position { x, y })
-            .collect();
         self.operations
             .push(OperationWithAdditionalData::PiOver8Rotation {
                 id,
                 targets: vec![(Position { x, y }, axis)],
-                ancilla_qubits,
+                routing_qubits: routing_qubits
+                    .iter()
+                    .map(|&(x, y)| Position { x, y })
+                    .collect(),
+                distillation_qubits: distillation_area
+                    .iter()
+                    .map(|&(x, y)| Position { x, y })
+                    .collect(),
                 num_distillations,
                 num_distillations_on_retry: distillation_area.len() as u32,
             });
@@ -2726,7 +2731,8 @@ mod tests {
         let operations = vec![OperationWithAdditionalData::PiOver8Rotation {
             id,
             targets: vec![(Position { x: 0, y: 1 }, Pauli::Z)],
-            ancilla_qubits: vec![Position { x: 0, y: 0 }, Position { x: 1, y: 0 }],
+            routing_qubits: vec![],
+            distillation_qubits: vec![Position { x: 0, y: 0 }, Position { x: 1, y: 0 }],
             num_distillations: 6,
             num_distillations_on_retry: 2,
         }];
@@ -2802,7 +2808,8 @@ mod tests {
         let operations = vec![OperationWithAdditionalData::PiOver8Rotation {
             id,
             targets: vec![(Position { x: 0, y: 1 }, Pauli::X)],
-            ancilla_qubits: vec![Position { x: 1, y: 1 }, Position { x: 2, y: 1 }],
+            routing_qubits: vec![],
+            distillation_qubits: vec![Position { x: 1, y: 1 }, Position { x: 2, y: 1 }],
             num_distillations: 6,
             num_distillations_on_retry: 2,
         }];
@@ -2893,10 +2900,12 @@ mod tests {
         let operations = vec![OperationWithAdditionalData::PiOver8Rotation {
             id,
             targets: vec![(Position { x: 0, y: 1 }, Pauli::Y)],
-            ancilla_qubits: vec![
+            routing_qubits: vec![
                 Position { x: 1, y: 1 },
                 Position { x: 1, y: 0 },
                 Position { x: 0, y: 0 },
+            ],
+            distillation_qubits: vec![
                 Position { x: 2, y: 1 },
                 Position { x: 2, y: 2 },
                 Position { x: 1, y: 2 },
@@ -3099,17 +3108,30 @@ mod tests {
         let pos1 = Position { x: 0, y: 1 };
         let pos2 = Position { x: 0, y: 3 };
         let targets = vec![(pos1, Pauli::Y), (pos2, Pauli::X)];
-        let ancilla_qubits = vec![Position { x: 0, y: 2 }];
+        let routing_qubits = vec![Position { x: 1, y: 1 }];
+        let distillation_qubits = vec![Position { x: 1, y: 2 }];
         let op = OperationWithAdditionalData::PiOver8Rotation {
             id,
             targets,
-            ancilla_qubits,
+            routing_qubits,
+            distillation_qubits,
             num_distillations: 4,
             num_distillations_on_retry: 2,
         };
 
         let serialized = serde_json::to_string(&op).unwrap();
-        let expectation = r#"{"type":"PI_OVER_8_ROTATION","id":91,"targets":[{"x":0,"y":1,"axis":"Y"},{"x":0,"y":3,"axis":"X"}],"ancilla_qubits":[{"x":0,"y":2}],"num_distillations":4,"num_distillations_on_retry":2}"#;
+        let expectation = r#"
+        {
+            "type":"PI_OVER_8_ROTATION",
+            "id":91,
+            "targets":[{"x":0,"y":1,"axis":"Y"},{"x":0,"y":3,"axis":"X"}],
+            "routing_qubits":[{"x":1,"y":1}],
+            "distillation_qubits":[{"x":1,"y":2}],
+            "num_distillations":4,
+            "num_distillations_on_retry":2
+        }"#
+        .replace("\n", "")
+        .replace(" ", "");
 
         assert_eq!(serialized, expectation);
     }

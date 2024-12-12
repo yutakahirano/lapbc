@@ -476,7 +476,8 @@ mod tests {
             num_distillations: 3,
             num_distillations_on_retry: 3,
             targets: vec![(p(0, 0), Pauli::Z)],
-            ancilla_qubits: vec![p(0, 1), p(0, 2), p(1, 2)],
+            routing_qubits: vec![],
+            distillation_qubits: vec![p(0, 1), p(0, 2), p(1, 2)],
         }];
 
         let mut schedule = new_occupancy_map(
@@ -527,7 +528,8 @@ mod tests {
             num_distillations: 3,
             num_distillations_on_retry: 3,
             targets: vec![(p(0, 0), Pauli::Z)],
-            ancilla_qubits: vec![p(0, 1), p(0, 2), p(1, 2)],
+            routing_qubits: vec![],
+            distillation_qubits: vec![p(0, 1), p(0, 2), p(1, 2)],
         }];
 
         let mut schedule = new_occupancy_map(
@@ -579,7 +581,8 @@ mod tests {
             num_distillations: 3,
             num_distillations_on_retry: 2,
             targets: vec![(p(0, 0), Pauli::Z)],
-            ancilla_qubits: vec![p(0, 1), p(0, 2)],
+            routing_qubits: vec![],
+            distillation_qubits: vec![p(0, 1), p(0, 2)],
         }];
 
         let mut schedule = new_occupancy_map(
@@ -641,7 +644,8 @@ mod tests {
                 num_distillations: 3,
                 num_distillations_on_retry: 3,
                 targets: vec![(p(0, 0), Pauli::Z)],
-                ancilla_qubits: vec![p(0, 1), p(1, 1), p(0, 2)],
+                routing_qubits: vec![],
+                distillation_qubits: vec![p(0, 1), p(1, 1), p(0, 2)],
             },
             OperationWithAdditionalData::PiOver4Rotation {
                 id: id1,
@@ -653,7 +657,8 @@ mod tests {
                 num_distillations: 3,
                 num_distillations_on_retry: 2,
                 targets: vec![(p(0, 0), Pauli::X)],
-                ancilla_qubits: vec![p(1, 0), p(2, 0), p(2, 1)],
+                routing_qubits: vec![],
+                distillation_qubits: vec![p(1, 0), p(2, 0), p(2, 1)],
             },
         ];
 
@@ -725,7 +730,8 @@ mod tests {
                 num_distillations: 1,
                 num_distillations_on_retry: 1,
                 targets: vec![(p(1, 1), Pauli::Z)],
-                ancilla_qubits: vec![p(1, 2)],
+                routing_qubits: vec![],
+                distillation_qubits: vec![p(1, 2)],
             },
             OperationWithAdditionalData::PiOver4Rotation {
                 id: id1,
@@ -792,7 +798,8 @@ mod tests {
                 num_distillations: 3,
                 num_distillations_on_retry: 3,
                 targets: vec![(p(0, 0), Pauli::Z)],
-                ancilla_qubits: vec![p(0, 1), p(1, 1), p(0, 2)],
+                routing_qubits: vec![],
+                distillation_qubits: vec![p(0, 1), p(1, 1), p(0, 2)],
             },
             OperationWithAdditionalData::PiOver4Rotation {
                 id: id1,
@@ -858,7 +865,8 @@ mod tests {
                 num_distillations: 1,
                 num_distillations_on_retry: 1,
                 targets: vec![(Position { x: 1, y: 1 }, Pauli::Z)],
-                ancilla_qubits: vec![p(1, 2)],
+                routing_qubits: vec![],
+                distillation_qubits: vec![p(1, 2)],
             },
             OperationWithAdditionalData::PiOver4Rotation {
                 id: id1,
