@@ -29,7 +29,7 @@ impl<'a> Targets<'a> {
     }
 }
 
-impl<'a> serde::Serialize for Targets<'a> {
+impl serde::Serialize for Targets<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -456,7 +456,7 @@ impl Board {
 
         self.ensure_board_occupancy(cycle + distance + y_initialization_cost(distance));
         match axis {
-            Pauli::I => return true,
+            Pauli::I => true,
             Pauli::X => {
                 let mut candidates = vec![];
                 if x > 0 {
