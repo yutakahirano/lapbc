@@ -3,9 +3,9 @@ use std::ops::{Index, IndexMut};
 
 use rand::{thread_rng, Rng};
 
-use crate::board::Configuration;
 use crate::board::Map2D;
 use crate::board::OperationId;
+use crate::board::{y_measurement_cost, Configuration};
 use crate::board::{Board, OperationWithAdditionalData};
 use crate::board::{BoardOccupancy, Position};
 
@@ -91,20 +91,38 @@ impl OccupancyMap {
     }
 }
 
-enum Blocking {
-    // No blocking is required.
-    None,
-    // All magic state distillation operations failed, and we need to retry them.
-    DistillationFailure,
-    // A lattice surgery operation is blocked by arbitrary operation running on any of the qubits
-    // on which it is performed.
-    LatticeSurgeryIsWaiting,
+#[derive(Debug)]
+enum PiOver8RotationState {
+    Distillation {
+        steps: Vec<(Position, u32)>,
+        has_magic_state: bool,
+    },
+    LatticeSurgery {
+        steps: u32,
+    },
+    Correction {
+        steps: u32,
+    },
+}
+
+#[derive(Debug)]
+enum PiOver4RotationState {
+    Initial,
+    LatticeSurgery { steps: u32 },
+    Correction { steps: u32 },
 }
 
 pub struct Runner {
     operations: HashMap<OperationId, OperationWithAdditionalData>,
     schedule: OccupancyMap,
     conf: Configuration,
+
+    delay_at: Map2D<u32>,
+    end_cycle_at: Map2D<u32>,
+    runtime_cycle: u32,
+    pi_over_4_rotation_states: HashMap<OperationId, PiOver4RotationState>,
+    pi_over_8_rotation_states: HashMap<OperationId, PiOver8RotationState>,
+    removed_operation_ids: HashSet<OperationId>,
 }
 
 impl Runner {
@@ -121,129 +139,335 @@ impl Runner {
             }
             end_cycle_at[(x, y)] = cycle;
         }
+        let operations = board
+            .operations()
+            .iter()
+            .map(|op| (op.id(), op.clone()))
+            .collect::<HashMap<_, _>>();
         Runner {
-            operations: board
-                .operations()
-                .iter()
-                .map(|op| (op.id(), op.clone()))
-                .collect(),
+            operations,
             schedule,
             conf: board.configuration().clone(),
+            delay_at: Map2D::new_with_value(board.width(), board.height(), 0),
+            end_cycle_at,
+            runtime_cycle: 0,
+            pi_over_4_rotation_states: HashMap::new(),
+            pi_over_8_rotation_states: HashMap::new(),
+            removed_operation_ids: HashSet::new(),
         }
     }
 
-    // Runs the schedule, and returns the number of cycles it took to complete.
-    fn run_internal<R: Rng>(&self, rng: &mut R) -> u32 {
+    fn register_initial_state(&mut self, occupancy: BoardOccupancy) {
+        use OperationWithAdditionalData::*;
+
+        if let Some(id) = occupancy.operation_id() {
+            if self.removed_operation_ids.contains(&id) {
+                return;
+            }
+            let op = &self.operations[&id];
+            match op {
+                PiOver4Rotation { .. } => {
+                    self.pi_over_4_rotation_states
+                        .entry(id)
+                        .or_insert(PiOver4RotationState::Initial);
+                }
+                PiOver8Rotation {
+                    distillation_qubits,
+                    ..
+                } => {
+                    let steps = distillation_qubits
+                        .iter()
+                        .map(|pos| (*pos, 0_u32))
+                        .collect::<Vec<_>>();
+                    let has_magic_state = false;
+                    self.pi_over_8_rotation_states.entry(id).or_insert(
+                        PiOver8RotationState::Distillation {
+                            steps,
+                            has_magic_state,
+                        },
+                    );
+                }
+                SingleQubitPiOver8RotationBlock { .. } => unimplemented!(),
+            }
+        }
+    }
+
+    fn perform_pi_over_4_rotation_state_transition(&mut self) {
         use BoardOccupancy::*;
-        let width = self.schedule.width;
-        let height = self.schedule.height;
-        let single_success_rate = self.conf.magic_state_distillation_success_rate;
-        let distillation_cost = self.conf.magic_state_distillation_cost;
-        let mut delay_map = Map2D::<u32>::new_with_value(width, height, 0);
-        for scheduled_cycle in 0..self.schedule.end_cycle() {
-            // Ensure that qubits involved in a lattice surgery operation have the same delay.
-            let mut delay_with_operation_ids: HashMap<OperationId, u32> = HashMap::new();
-            let mut ending_distillations: HashSet<BoardOccupancy> = HashSet::new();
-            for y in 0..height {
-                for x in 0..width {
-                    let occupancy = &self.schedule[(x, y, scheduled_cycle)];
-                    let id = match *occupancy {
-                        LatticeSurgery(id) => id,
-                        DataQubitInOperation(id) => id,
-                        MagicStateDistillation { .. } => {
-                            // Here we assume that each distillation block ends at the same cycle.
-                            if *occupancy != self.schedule[(x, y, scheduled_cycle + 1)] {
-                                ending_distillations.insert(occupancy.clone());
-                            }
+        use OperationWithAdditionalData::*;
+        let mut to_be_removed = vec![];
+        for (id, state) in &mut self.pi_over_4_rotation_states {
+            let op = &self.operations[id];
+            let mut qubits = match op {
+                PiOver4Rotation {
+                    targets,
+                    ancilla_qubits,
+                    ..
+                } => targets
+                    .iter()
+                    .map(|(pos, _)| pos)
+                    .chain(ancilla_qubits.iter()),
+                _ => unreachable!(),
+            };
+            loop {
+                match state {
+                    PiOver4RotationState::Initial => {
+                        let is_ready = |pos: &Position| {
+                            let cycle_on_schedule =
+                                self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
+                            let occupancy = &self.schedule[(pos.x, pos.y, cycle_on_schedule)];
+                            matches!(occupancy, LatticeSurgery(id) | DataQubitInOperation(id) if *id == op.id())
+                        };
+                        if qubits.all(is_ready) {
+                            *state = PiOver4RotationState::LatticeSurgery { steps: 0 };
                             continue;
                         }
-                        _ => continue,
-                    };
-
-                    let delay = delay_with_operation_ids.entry(id).or_insert(0);
-                    *delay = std::cmp::max(*delay, delay_map[(x, y)]);
-                }
-            }
-            for y in 0..height {
-                for x in 0..width {
-                    let occupancy = &self.schedule[(x, y, scheduled_cycle)];
-                    let id = match *occupancy {
-                        LatticeSurgery(id) => id,
-                        DataQubitInOperation(id) => id,
-                        _ => continue,
-                    };
-                    delay_map[(x, y)] = *delay_with_operation_ids.get(&id).unwrap();
-                }
-            }
-
-            // Decrease the delay on qubits that are idle.
-            for y in 0..height {
-                for x in 0..width {
-                    let occupancy = &self.schedule[(x, y, scheduled_cycle)];
-                    if occupancy.is_vacant_or_idle() {
-                        delay_map[(x, y)] = delay_map[(x, y)].saturating_sub(1);
                     }
-                }
-            }
-
-            // Deal with magic state distillation that can generate new delay.
-            for distillation in ending_distillations {
-                if let BoardOccupancy::MagicStateDistillation(id) = distillation {
-                    let op = self.operations.get(&id).unwrap();
-                    let (num_distillations, num_distillations_on_retry) =
-                        if let OperationWithAdditionalData::PiOver8Rotation {
-                            num_distillations,
-                            num_distillations_on_retry,
-                            ..
-                        } = op
-                        {
-                            (*num_distillations, *num_distillations_on_retry)
-                        } else {
-                            unreachable!();
+                    PiOver4RotationState::LatticeSurgery { steps } => {
+                        if steps == &self.conf.code_distance {
+                            *state = PiOver4RotationState::Correction { steps: 0 };
+                            continue;
+                        }
+                    }
+                    PiOver4RotationState::Correction { steps } => {
+                        let is_correction = |pos: &Position| {
+                            let cycle_on_schedule =
+                                self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
+                            if cycle_on_schedule >= self.schedule.end_cycle() {
+                                return false;
+                            }
+                            let occupancy = &self.schedule[(pos.x, pos.y, cycle_on_schedule)];
+                            matches!(occupancy, YMeasurement(id) if *id == op.id())
                         };
-
-                    let mut new_delay = 0;
-                    let mut done = false;
-                    for _ in 0..num_distillations {
-                        if rng.gen_range(0.0..1.0) < single_success_rate {
-                            done = true;
-                            break;
-                        }
-                    }
-
-                    while !done {
-                        new_delay += distillation_cost;
-                        for _ in 0..num_distillations_on_retry {
-                            if rng.gen_range(0.0..1.0) < single_success_rate {
-                                done = true;
-                                break;
-                            }
-                        }
-                    }
-                    // Here we do not care which distillation succeeded. That is not problematic
-                    // because our scheduler schedules a lattice surgery operation that covers
-                    // all the qubits right after distillation.
-                    for y in 0..height {
-                        for x in 0..width {
-                            if self.schedule[(x, y, scheduled_cycle)] == distillation {
-                                delay_map[(x, y)] += new_delay;
-                            }
+                        let y_measurement_cost = y_measurement_cost(self.conf.code_distance);
+                        let has_correction_occupancy = qubits.any(is_correction);
+                        if has_correction_occupancy {
+                            assert!(*steps < y_measurement_cost);
+                        } else {
+                            assert!(*steps == 0 || *steps == y_measurement_cost);
+                            to_be_removed.push(*id);
                         }
                     }
                 }
+                break;
             }
         }
-
-        let mut delay = 0;
-        for y in 0..height {
-            for x in 0..width {
-                delay = std::cmp::max(delay, delay_map[(x, y)]);
-            }
+        self.removed_operation_ids.extend(to_be_removed.iter());
+        for id in to_be_removed {
+            self.pi_over_4_rotation_states.remove(&id);
         }
-        delay
     }
 
-    pub fn run(&self) -> u32 {
+    // Returns true when this state must be removed.
+    fn perform_pi_over_8_rotation_state_transition(&mut self) {
+        use BoardOccupancy::*;
+        use OperationWithAdditionalData::*;
+        let mut to_be_removed = vec![];
+        for (id, state) in &mut self.pi_over_8_rotation_states {
+            loop {
+                match state {
+                    PiOver8RotationState::Distillation {
+                        has_magic_state, ..
+                    } => {
+                        let op = &self.operations[id];
+                        let mut qubits = match op {
+                            PiOver8Rotation {
+                                targets,
+                                routing_qubits,
+                                distillation_qubits,
+                                ..
+                            } => targets
+                                .iter()
+                                .map(|(pos, _)| pos)
+                                .chain(routing_qubits.iter())
+                                .chain(distillation_qubits.iter()),
+                            _ => unreachable!(),
+                        };
+
+                        if !*has_magic_state {
+                            break;
+                        }
+                        let is_ready = |pos: &Position| {
+                            let cycle_on_schedule =
+                                self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
+                            let occupancy = &self.schedule[(pos.x, pos.y, cycle_on_schedule)];
+                            matches!(occupancy, LatticeSurgery(id) | DataQubitInOperation(id) | MagicStateDistillation(id) if *id == op.id())
+                        };
+                        if qubits.all(is_ready) {
+                            *state = PiOver8RotationState::LatticeSurgery { steps: 0 };
+                            continue;
+                        }
+                    }
+                    PiOver8RotationState::LatticeSurgery { steps } => {
+                        if *steps == self.conf.code_distance {
+                            *state = PiOver8RotationState::Correction { steps: 0 };
+                            continue;
+                        }
+                    }
+                    PiOver8RotationState::Correction { steps } => {
+                        if *steps == y_measurement_cost(self.conf.code_distance) {
+                            to_be_removed.push(*id);
+                        }
+                    }
+                }
+                break;
+            }
+        }
+        self.removed_operation_ids.extend(to_be_removed.iter());
+        for id in to_be_removed {
+            self.pi_over_8_rotation_states.remove(&id);
+        }
+    }
+
+    fn process_pi_over_4_rotation(&mut self) {
+        use BoardOccupancy::*;
+        for (id, state) in &mut self.pi_over_4_rotation_states {
+            match state {
+                PiOver4RotationState::Initial => {
+                    // We are waiting for some qubits. Add delay to the ready qubits.
+                    let op = &self.operations[id];
+                    let qubits = match op {
+                        OperationWithAdditionalData::PiOver4Rotation {
+                            targets,
+                            ancilla_qubits,
+                            ..
+                        } => targets
+                            .iter()
+                            .map(|(pos, _)| pos)
+                            .chain(ancilla_qubits.iter()),
+                        _ => unreachable!(),
+                    };
+                    for pos in qubits {
+                        let cycle_on_schedule = self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
+                        let occupancy = &self.schedule[(pos.x, pos.y, cycle_on_schedule)];
+                        if matches!(occupancy, LatticeSurgery(id) | DataQubitInOperation(id) if *id == op.id())
+                        {
+                            self.delay_at[(pos.x, pos.y)] += 1;
+                        }
+                    }
+                }
+                PiOver4RotationState::LatticeSurgery { steps } => {
+                    *steps += 1;
+                }
+                PiOver4RotationState::Correction { steps } => {
+                    *steps += 1;
+                }
+            }
+        }
+    }
+
+    fn process_pi_over_8_rotation<R: Rng>(&mut self, rng: &mut R) {
+        use BoardOccupancy::*;
+        for (id, state) in &mut self.pi_over_8_rotation_states {
+            let op = &self.operations[id];
+            let qubits = match op {
+                OperationWithAdditionalData::PiOver8Rotation {
+                    targets,
+                    routing_qubits,
+                    distillation_qubits,
+                    ..
+                } => targets
+                    .iter()
+                    .map(|(pos, _)| pos)
+                    .chain(routing_qubits.iter())
+                    .chain(distillation_qubits.iter()),
+                _ => unreachable!(),
+            };
+            match state {
+                PiOver8RotationState::Distillation {
+                    steps,
+                    has_magic_state,
+                } => {
+                    for (pos, steps) in steps {
+                        let cycle_on_schedule = self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
+                        let occupancy = &self.schedule[(pos.x, pos.y, cycle_on_schedule)];
+                        if !matches!(occupancy, LatticeSurgery(id) | MagicStateDistillation(id) if *id == op.id())
+                        {
+                            assert_eq!(*steps, 0_u32);
+                            continue;
+                        }
+                        *steps += 1;
+                        #[allow(clippy::collapsible_if)]
+                        if *steps >= self.conf.magic_state_distillation_cost {
+                            let success_rate = self.conf.magic_state_distillation_success_rate;
+                            if rng.gen_range(0.0..1.0) < success_rate {
+                                *has_magic_state = true;
+                            }
+                            *steps = 0;
+                        }
+                    }
+
+                    // Add delay for qubits that are ready for lattice surgery.
+                    qubits.for_each(|pos| {
+                        let cycle_on_schedule = self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
+                        let occupancy = &self.schedule[(pos.x, pos.y, cycle_on_schedule)];
+                        if matches!(occupancy, LatticeSurgery(id) | DataQubitInOperation(id) if *id == op.id()) {
+                            self.delay_at[(pos.x, pos.y)] += 1;
+                        }
+                    });
+                }
+                PiOver8RotationState::LatticeSurgery { steps } => {
+                    for pos in qubits {
+                        let cycle_on_schedule = self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
+                        let occupancy = &self.schedule[(pos.x, pos.y, cycle_on_schedule)];
+                        assert!(
+                            matches!(occupancy, LatticeSurgery(id) | DataQubitInOperation(id) if *id == op.id())
+                        );
+                    }
+                    *steps += 1;
+                }
+                PiOver8RotationState::Correction { steps } => {
+                    *steps += 1;
+                }
+            }
+        }
+    }
+
+    fn run_internal<R: Rng>(&mut self, rng: &mut R) -> u32 {
+        let width = self.schedule.width;
+        let height = self.schedule.height;
+        loop {
+            let runtime_cycle = self.runtime_cycle;
+            for (x, y) in range_2d(width, height) {
+                // Decrease the delay on idle qubits.
+                while runtime_cycle - self.delay_at[(x, y)] < self.end_cycle_at[(x, y)] {
+                    let cycle_on_schedule = runtime_cycle - self.delay_at[(x, y)];
+                    let occupancy = &self.schedule[(x, y, cycle_on_schedule)];
+                    if occupancy.is_vacant_or_idle() && self.delay_at[(x, y)] > 0 {
+                        self.delay_at[(x, y)] -= 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                let cycle_on_schedule = runtime_cycle - self.delay_at[(x, y)];
+                if cycle_on_schedule < self.end_cycle_at[(x, y)] {
+                    let occupancy = self.schedule[(x, y, cycle_on_schedule)].clone();
+                    self.register_initial_state(occupancy);
+                }
+            }
+
+            self.perform_pi_over_4_rotation_state_transition();
+            self.perform_pi_over_8_rotation_state_transition();
+            self.process_pi_over_4_rotation();
+            self.process_pi_over_8_rotation(rng);
+
+            if range_2d(width, height).all(|(x, y)| {
+                let cycle_on_schedule = runtime_cycle - self.delay_at[(x, y)];
+                cycle_on_schedule >= self.end_cycle_at[(x, y)]
+            }) {
+                break;
+            }
+            self.runtime_cycle += 1;
+        }
+        let scheduled_end_cycle = range_2d(width, height)
+            .map(|(x, y)| self.end_cycle_at[(x, y)])
+            .max()
+            .unwrap();
+        self.runtime_cycle - scheduled_end_cycle
+    }
+
+    pub fn run(&mut self) -> u32 {
         let mut rng = thread_rng();
         self.run_internal(&mut rng)
     }
@@ -251,15 +475,12 @@ impl Runner {
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Range;
-
+    use super::*;
     use crate::{
-        board::Position,
         mapping::{DataQubitMapping, Qubit},
         pbc::Pauli,
     };
-
-    use super::*;
+    use std::ops::Range;
 
     struct RngForTesting {
         data: Vec<u64>,
@@ -332,6 +553,12 @@ mod tests {
             operations: operations.iter().map(|op| (op.id(), op.clone())).collect(),
             schedule,
             conf: conf.clone(),
+            delay_at: Map2D::new_with_value(width, height, 0),
+            end_cycle_at,
+            runtime_cycle: 0,
+            pi_over_4_rotation_states: HashMap::new(),
+            pi_over_8_rotation_states: HashMap::new(),
+            removed_operation_ids: HashSet::new(),
         }
     }
 
@@ -403,7 +630,7 @@ mod tests {
             end_cycle,
             &[mapping.get(q0).unwrap(), mapping.get(q1).unwrap()],
         );
-        let runner = new_runner(operations, schedule, &conf);
+        let mut runner = new_runner(operations, schedule, &conf);
         let result = runner.run_internal(&mut rng);
         assert_eq!(result, 0);
     }
@@ -411,7 +638,7 @@ mod tests {
     #[test]
     fn test_only_clifford() {
         use BoardOccupancy::*;
-        let end_cycle = 8_u32;
+        let end_cycle = 9_u32;
         let mut rng = RngForTesting::new_unusable();
         let conf = Configuration {
             width: 3,
@@ -443,9 +670,9 @@ mod tests {
         );
         set_occupancy(&mut schedule, 0, 0, 0..5, DataQubitInOperation(id));
         set_occupancy(&mut schedule, 0, 1, 0..5, LatticeSurgery(id));
-        set_occupancy(&mut schedule, 0, 1, 5..8, YMeasurement(id));
+        set_occupancy(&mut schedule, 0, 1, 5..9, YMeasurement(id));
 
-        let runner = new_runner(operations, schedule, &conf);
+        let mut runner = new_runner(operations, schedule, &conf);
         let result = runner.run_internal(&mut rng);
         assert_eq!(result, 0);
     }
@@ -497,9 +724,56 @@ mod tests {
         set_occupancy(&mut schedule, 1, 2, 13..18, LatticeSurgery(id));
         set_occupancy(&mut schedule, 1, 2, 18..22, YMeasurement(id));
 
-        let runner = new_runner(operations, schedule, &conf);
+        let mut runner = new_runner(operations, schedule, &conf);
         let result = runner.run_internal(&mut rng);
         assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_with_pi_over_8_rotations_with_delay_with_one_distillation_qubit() {
+        use BoardOccupancy::*;
+        let end_cycle = 22_u32;
+        let mut rng = RngForTesting::new(&[u64::MAX, u64::MAX, u64::MAX, u64::MAX, 0]);
+        let conf = Configuration {
+            width: 3,
+            height: 4,
+            code_distance: 5,
+            magic_state_distillation_cost: 13,
+            num_distillations_for_pi_over_8_rotation: 5,
+            magic_state_distillation_success_rate: 0.5,
+        };
+
+        let mut mapping = DataQubitMapping::new(conf.width, conf.height);
+        let q0 = Qubit::new(0);
+        let q1 = Qubit::new(1);
+        mapping.map(q0, 0, 0);
+        mapping.map(q1, 2, 3);
+
+        let id = OperationId::new(0);
+        let operations = vec![OperationWithAdditionalData::PiOver8Rotation {
+            id,
+            num_distillations: 3,
+            num_distillations_on_retry: 3,
+            targets: vec![(p(0, 0), Pauli::Z)],
+            routing_qubits: vec![],
+            distillation_qubits: vec![p(0, 1)],
+        }];
+
+        let mut schedule = new_occupancy_map(
+            conf.width,
+            conf.height,
+            end_cycle,
+            &[mapping.get(q0).unwrap(), mapping.get(q1).unwrap()],
+        );
+        set_occupancy(&mut schedule, 0, 0, 13..18, DataQubitInOperation(id));
+        set_occupancy(&mut schedule, 0, 1, 0..13, MagicStateDistillation(id));
+        set_occupancy(&mut schedule, 0, 1, 13..18, LatticeSurgery(id));
+        set_occupancy(&mut schedule, 0, 1, 18..22, YMeasurement(id));
+
+        let mut runner = new_runner(operations, schedule, &conf);
+        let result = runner.run_internal(&mut rng);
+        assert_eq!(result, 52);
+        assert_eq!(rng.counter, 5);
     }
 
     #[test]
@@ -549,17 +823,25 @@ mod tests {
         set_occupancy(&mut schedule, 1, 2, 13..18, LatticeSurgery(id));
         set_occupancy(&mut schedule, 1, 2, 18..22, YMeasurement(id));
 
-        let runner = new_runner(operations, schedule, &conf);
+        let mut runner = new_runner(operations, schedule, &conf);
         let result = runner.run_internal(&mut rng);
         assert_eq!(result, 13);
-        assert_eq!(rng.counter, 5);
+        assert_eq!(rng.counter, 6);
     }
 
     #[test]
     fn test_magic_state_distillation_retry() {
         use BoardOccupancy::*;
         let end_cycle = 35_u32;
-        let mut rng = RngForTesting::new(&[u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX, 0]);
+        let mut rng = RngForTesting::new(&[
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+            0,
+        ]);
         let conf = Configuration {
             width: 3,
             height: 4,
@@ -599,10 +881,10 @@ mod tests {
         set_occupancy(&mut schedule, 0, 2, 26..31, LatticeSurgery(id));
         set_occupancy(&mut schedule, 0, 2, 31..35, YMeasurement(id));
 
-        let runner = new_runner(operations, schedule, &conf);
+        let mut runner = new_runner(operations, schedule, &conf);
         let result = runner.run_internal(&mut rng);
         assert_eq!(result, 26);
-        assert_eq!(rng.counter, 6);
+        assert_eq!(rng.counter, 8);
     }
 
     #[test]
@@ -610,14 +892,24 @@ mod tests {
         use BoardOccupancy::*;
         let end_cycle = 49_u32;
         let mut rng = RngForTesting::new(&[
+            // First three distillations for id 0 starting at cycle 0 => all fail
             u64::MAX,
             u64::MAX,
             u64::MAX,
+            // Next three distillations for id0 starting at cycle 13 => one succeeds
             u64::MAX,
             0,
             u64::MAX,
+            // First two distillations for id2 (because (2, 1) is delayed) starting at cycle 27 => all fail
             u64::MAX,
             u64::MAX,
+            // Next three distillations starting at cycle 40 => fail
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+            // Next three distillations for id2 starting at cycle 53 => all succeed
+            0,
+            0,
             0,
         ]);
         let conf = Configuration {
@@ -650,7 +942,7 @@ mod tests {
             OperationWithAdditionalData::PiOver4Rotation {
                 id: id1,
                 targets: vec![(p(2, 2), Pauli::Z)],
-                ancilla_qubits: vec![p(1, 1), p(2, 1), p(2, 2)],
+                ancilla_qubits: vec![p(1, 1), p(2, 1)],
             },
             OperationWithAdditionalData::PiOver8Rotation {
                 id: id2,
@@ -695,10 +987,10 @@ mod tests {
         set_occupancy(&mut schedule, 2, 1, 40..45, LatticeSurgery(id2));
         set_occupancy(&mut schedule, 2, 1, 45..49, YMeasurement(id2));
 
-        let runner = new_runner(operations, schedule, &conf);
+        let mut runner = new_runner(operations, schedule, &conf);
         let result = runner.run_internal(&mut rng);
         assert_eq!(result, 26);
-        assert_eq!(rng.counter, 9);
+        assert_eq!(rng.counter, 14);
     }
 
     #[test]
@@ -764,7 +1056,7 @@ mod tests {
         set_occupancy(&mut schedule, 2, 1, 23..28, LatticeSurgery(id2));
         set_occupancy(&mut schedule, 2, 1, 28..32, YMeasurement(id2));
 
-        let runner = new_runner(operations, schedule, &conf);
+        let mut runner = new_runner(operations, schedule, &conf);
         let result = runner.run_internal(&mut rng);
         assert_eq!(result, 13);
         assert_eq!(rng.counter, 2);
@@ -830,10 +1122,10 @@ mod tests {
         set_occupancy(&mut schedule, 2, 1, 24..29, LatticeSurgery(id1));
         set_occupancy(&mut schedule, 2, 2, 24..29, DataQubitInOperation(id1));
 
-        let runner = new_runner(operations, schedule, &conf);
+        let mut runner = new_runner(operations, schedule, &conf);
         let result = runner.run_internal(&mut rng);
         assert_eq!(result, 11);
-        assert_eq!(rng.counter, 5);
+        assert_eq!(rng.counter, 6);
     }
 
     #[test]
@@ -899,7 +1191,7 @@ mod tests {
         set_occupancy(&mut schedule, 2, 1, 25..30, LatticeSurgery(id2));
         set_occupancy(&mut schedule, 2, 1, 30..34, YMeasurement(id2));
 
-        let runner = new_runner(operations, schedule, &conf);
+        let mut runner = new_runner(operations, schedule, &conf);
         let result = runner.run_internal(&mut rng);
         assert_eq!(result, 11);
         assert_eq!(rng.counter, 2);

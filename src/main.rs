@@ -791,7 +791,7 @@ fn main() {
     let n = 50;
     let mut average_delay = 0.0;
     for _ in 0..n {
-        let runner = runner::Runner::new(&board);
+        let mut runner = runner::Runner::new(&board);
         let delay = runner.run();
         average_delay += (delay as f64) / n as f64;
     }

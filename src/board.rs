@@ -290,11 +290,11 @@ impl OperationId {
     }
 }
 
-fn y_initialization_cost(distance: u32) -> u32 {
+pub fn y_initialization_cost(distance: u32) -> u32 {
     distance + y_measurement_cost(distance)
 }
 
-fn y_measurement_cost(distance: u32) -> u32 {
+pub fn y_measurement_cost(distance: u32) -> u32 {
     (distance / 2) + 2
 }
 
@@ -1365,7 +1365,7 @@ impl Board {
         let new_size = ((cycle + 1) as usize) * size;
         self.occupancy.resize(new_size, BoardOccupancy::Vacant);
         for c in current_max_cycle..cycle + 1 {
-            for (_q, (x, y)) in &self.data_qubit_mapping {
+            for (x, y) in self.data_qubit_mapping.values() {
                 let o = BoardOccupancy::IdleDataQubit;
                 // We don't use set_occupancy here in order to avoid Rust borrow checker complaints.
                 let index =
