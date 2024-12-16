@@ -74,6 +74,9 @@ pub enum OperationWithAdditionalData {
     SingleQubitPiOver8RotationBlock {
         id: OperationId,
         target: Position,
+        routing_qubits: Vec<Position>,
+        distillation_qubits: Vec<Position>,
+        correction_qubits: Vec<Position>,
         pi_over_8_axes: Vec<Pauli>,
         pi_over_4_axes: Vec<Pauli>,
     }, // Measurement should be listed below, but it is not implemented yet.
@@ -144,14 +147,20 @@ impl serde::Serialize for OperationWithAdditionalData {
             SingleQubitPiOver8RotationBlock {
                 id,
                 target,
+                routing_qubits,
+                distillation_qubits,
+                correction_qubits,
                 pi_over_8_axes,
                 pi_over_4_axes,
             } => {
                 put!(
                     "SINGLE_QUBIT_PI_OVER_8_ROTATION_BLOCK",
-                    4,
+                    7,
                     ("id", id.id),
                     ("target", target),
+                    ("routing_qubits", routing_qubits),
+                    ("distillation_qubits", distillation_qubits),
+                    ("correction_qubits", correction_qubits),
                     ("pi_over_8_axes", pi_over_8_axes),
                     ("pi_over_4_axes", pi_over_4_axes)
                 )
@@ -1301,6 +1310,8 @@ impl Board {
         let last_y_measurement_range =
             Self::translate(0..y_measurement_cost, last_correction_range.end);
 
+        assert!(!distillation_qubits.is_empty());
+        assert_eq!(routing_qubits.len(), 3);
         // We choose one qubit for the second-last Clifford correction from `distillation_qubits`,
         // and one qubit for the last Clifford correction from `routing_qubits`. This implies that
         // the last Clifford correction's axis cannot be Y. We can guarantee that at runtime.
@@ -1308,6 +1319,10 @@ impl Board {
         // simplicity.
         let (cx1, cy1) = distillation_qubits[0];
         let (cx2, cy2) = routing_qubits[0];
+        let (cx3, cy3) = routing_qubits[1];
+
+        assert_eq!(cy2, y);
+        assert_eq!(cx3, x);
 
         if !self.is_vacant(cx1, cy1, second_last_correction_range.clone()) {
             return false;
@@ -1339,12 +1354,27 @@ impl Board {
         }
 
         // The Y measurement for the last Clifford correction.
-        self.set_occupancy_range(cx2, cy2, last_y_measurement_range, YMeasurement(id));
+        self.set_occupancy_range(cx2, cy2, last_y_measurement_range.clone(), YMeasurement(id));
+        self.set_occupancy_range(cx3, cy3, last_y_measurement_range, YMeasurement(id));
 
+        let correction_qubits = vec![
+            Position { x: cx1, y: cy1 },
+            Position { x: cx2, y: cy2 },
+            Position { x: cx3, y: cy3 },
+        ];
         self.operations
             .push(OperationWithAdditionalData::SingleQubitPiOver8RotationBlock {
                 id,
                 target: Position { x, y },
+                routing_qubits: routing_qubits
+                    .iter()
+                    .map(|&(x, y)| Position { x, y })
+                    .collect(),
+                distillation_qubits: distillation_qubits
+                    .iter()
+                    .map(|&(x, y)| Position { x, y })
+                    .collect(),
+                correction_qubits,
                 pi_over_8_axes: pi_over_8_rotation_axes.to_vec(),
                 pi_over_4_axes: pi_over_4_rotation_axes.to_vec(),
             });
@@ -1592,6 +1622,10 @@ mod tests {
         };
 
         Board::new(mapping, &conf)
+    }
+
+    fn p(x: u32, y: u32) -> Position {
+        Position { x, y }
     }
 
     #[test]
@@ -3042,7 +3076,8 @@ mod tests {
 
         assert!(board.is_occupancy(0, 1, 0..27, PiOver8RotationBlock(id)));
         assert!(board.is_occupancy(0, 1, 27..33, LatticeSurgery(id)));
-        assert!(board.is_occupancy(0, 1, 33..40, Vacant));
+        assert!(board.is_occupancy(0, 1, 33..36, YMeasurement(id)));
+        assert!(board.is_occupancy(0, 1, 36..40, Vacant));
         assert!(board.is_occupancy(1, 1, 0..27, PiOver8RotationBlock(id)));
         assert!(board.is_occupancy(1, 1, 27..33, LatticeSurgery(id)));
         assert!(board.is_occupancy(1, 1, 33..40, Vacant));
@@ -3072,6 +3107,9 @@ mod tests {
             OperationWithAdditionalData::SingleQubitPiOver8RotationBlock {
                 id,
                 target: Position { x: 0, y: 0 },
+                routing_qubits: vec![p(1, 0), p(0, 1), p(1, 1)],
+                distillation_qubits: vec![p(0, 2), p(0, 3), p(1, 2), p(2, 0), p(2, 1)],
+                correction_qubits: vec![p(0, 2), p(1, 0), p(0, 1)],
                 pi_over_8_axes: pi_over_8_axes.to_vec(),
                 pi_over_4_axes: pi_over_4_axes.to_vec(),
             },
@@ -3142,15 +3180,33 @@ mod tests {
         let pos = Position { x: 0, y: 2 };
         let pi_over_8_axes = [Pauli::Y, Pauli::Z, Pauli::X, Pauli::Z];
         let pi_over_4_axes = [Pauli::X, Pauli::Y];
+        let routing_qubits = [p(1, 2), p(0, 1), p(1, 1)];
+        let distributions_qubits = [p(0, 0), p(1, 0)];
+        let correction_qubits = [p(0, 0), p(1, 2), p(0, 1)];
         let op = OperationWithAdditionalData::SingleQubitPiOver8RotationBlock {
             id,
             target: pos,
+            routing_qubits: routing_qubits.to_vec(),
+            distillation_qubits: distributions_qubits.to_vec(),
+            correction_qubits: correction_qubits.to_vec(),
             pi_over_8_axes: pi_over_8_axes.to_vec(),
             pi_over_4_axes: pi_over_4_axes.to_vec(),
         };
 
         let serialized = serde_json::to_string(&op).unwrap();
-        let expectation = r#"{"type":"SINGLE_QUBIT_PI_OVER_8_ROTATION_BLOCK","id":91,"target":{"x":0,"y":2},"pi_over_8_axes":["Y","Z","X","Z"],"pi_over_4_axes":["X","Y"]}"#;
+        let expectation = r#"
+        {
+            "type":"SINGLE_QUBIT_PI_OVER_8_ROTATION_BLOCK",
+            "id":91,
+            "target":{"x":0,"y":2},
+            "routing_qubits": [{"x":1,"y":2},{"x":0,"y":1},{"x":1,"y":1}],
+            "distillation_qubits": [{"x":0,"y":0},{"x":1,"y":0}],
+            "correction_qubits": [{"x":0,"y":0},{"x":1,"y":2},{"x":0,"y":1}],
+            "pi_over_8_axes":["Y","Z","X","Z"],
+            "pi_over_4_axes":["X","Y"]
+        }"#
+        .replace("\n", "")
+        .replace(" ", "");
 
         assert_eq!(serialized, expectation);
     }
