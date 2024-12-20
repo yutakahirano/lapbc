@@ -203,6 +203,7 @@ fn translate_gate(
     registers: &Registers,
     output: &mut Vec<pbc::Operation>,
 ) -> Result<(), String> {
+    println!("angle_args = {:?}", angle_args);
     use pbc::Operation::Measurement as M;
     use pbc::Operation::PauliRotation as R;
     let num_qubits = registers.num_qubits();

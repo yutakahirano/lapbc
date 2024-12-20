@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ops::{Index, IndexMut};
 
 use rand::{thread_rng, Rng};
@@ -91,6 +91,12 @@ impl OccupancyMap {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PatchDirection {
+    HorizontalZBoundary,
+    VerticalZBoundary,
+}
+
 #[derive(Debug)]
 enum PiOver8RotationState {
     Distillation {
@@ -112,6 +118,71 @@ enum PiOver4RotationState {
     Correction { steps: u32 },
 }
 
+// Represents the distillation state in SingleQubitPiOver8RotationBlock.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DistillationState {
+    position: Position,
+    steps: u32,
+    direction: PatchDirection,
+    is_involved_with_lattice_surgery: bool,
+}
+
+impl DistillationState {
+    fn new(position: Position, direction: PatchDirection) -> Self {
+        DistillationState {
+            position,
+            steps: 0,
+            direction,
+            is_involved_with_lattice_surgery: false,
+        }
+    }
+
+    fn renew(&mut self) {
+        self.steps = 0;
+        self.is_involved_with_lattice_surgery = false;
+    }
+
+    fn mark_as_involved_with_lattice_surgery(&mut self) {
+        self.is_involved_with_lattice_surgery = true;
+        self.steps = 0;
+    }
+
+    fn is_ready(&self, conf: &Configuration) -> bool {
+        self.steps == conf.magic_state_distillation_cost
+    }
+
+    fn run_distillation<R: Rng>(&mut self, rng: &mut R, conf: &Configuration) {
+        if self.is_ready(conf) {
+            return;
+        }
+        if self.is_involved_with_lattice_surgery {
+            return;
+        }
+        self.steps += 1;
+        if self.steps == conf.magic_state_distillation_cost {
+            let success_rate = conf.magic_state_distillation_success_rate;
+            if rng.gen_range(0.0..1.0) > success_rate {
+                // Distillation failed.
+                self.steps = 0;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum SingleQubitPiOver8RotationBlockState {
+    PiOver8Rotation {
+        // Represents the pi/8 rotation being performed.
+        index: u32,
+        // None if lattice surgery is not being performed.
+        lattice_surgery_steps: Option<u32>,
+        distillation_steps: Vec<DistillationState>,
+    },
+    Correction {
+        steps: u32,
+    },
+}
+
 pub struct Runner {
     operations: HashMap<OperationId, OperationWithAdditionalData>,
     schedule: OccupancyMap,
@@ -122,6 +193,7 @@ pub struct Runner {
     runtime_cycle: u32,
     pi_over_4_rotation_states: HashMap<OperationId, PiOver4RotationState>,
     pi_over_8_rotation_states: HashMap<OperationId, PiOver8RotationState>,
+    pi_over_8_rotation_block_states: HashMap<OperationId, SingleQubitPiOver8RotationBlockState>,
     removed_operation_ids: HashSet<OperationId>,
 }
 
@@ -153,8 +225,70 @@ impl Runner {
             runtime_cycle: 0,
             pi_over_4_rotation_states: HashMap::new(),
             pi_over_8_rotation_states: HashMap::new(),
+            pi_over_8_rotation_block_states: HashMap::new(),
             removed_operation_ids: HashSet::new(),
         }
+    }
+
+    fn new_distillation_states(
+        target: &Position,
+        routing_qubits: &[Position],
+        distillation_qubits: &[Position],
+    ) -> Vec<DistillationState> {
+        use PatchDirection::*;
+        let mut states = vec![];
+
+        // We use Vector here because we assume the number of qubits is not so large.
+        let mut visited_qubits = routing_qubits
+            .iter()
+            .chain(std::iter::once(target))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut q = VecDeque::new();
+        for pos in distillation_qubits {
+            if pos.x > 0 && routing_qubits.contains(&Position::new(pos.x - 1, pos.y)) {
+                q.push_back((*pos, VerticalZBoundary));
+            }
+            if pos.y > 0 && routing_qubits.contains(&Position::new(pos.x, pos.y - 1)) {
+                q.push_back((*pos, HorizontalZBoundary));
+            }
+            if routing_qubits.contains(&Position::new(pos.x + 1, pos.y)) {
+                q.push_back((*pos, VerticalZBoundary));
+            }
+            if routing_qubits.contains(&Position::new(pos.x, pos.y + 1)) {
+                q.push_back((*pos, HorizontalZBoundary));
+            }
+        }
+
+        while let Some((pos, direction)) = q.pop_front() {
+            if visited_qubits.contains(&pos) {
+                continue;
+            }
+            visited_qubits.push(pos);
+            states.push(DistillationState::new(pos, direction));
+
+            if pos.y > 0 && distillation_qubits.contains(&Position::new(pos.x, pos.y - 1)) {
+                q.push_back((Position::new(pos.x, pos.y - 1), HorizontalZBoundary));
+            }
+            if pos.x > 0 && distillation_qubits.contains(&Position::new(pos.x - 1, pos.y)) {
+                q.push_back((Position::new(pos.x - 1, pos.y), VerticalZBoundary));
+            }
+            if distillation_qubits.contains(&Position::new(pos.x + 1, pos.y)) {
+                q.push_back((Position::new(pos.x + 1, pos.y), VerticalZBoundary));
+            }
+            if distillation_qubits.contains(&Position::new(pos.x, pos.y + 1)) {
+                q.push_back((Position::new(pos.x, pos.y + 1), HorizontalZBoundary));
+            }
+        }
+
+        let mut positions_in_states = states.iter().map(|s| s.position).collect::<Vec<_>>();
+        positions_in_states.sort();
+        let mut sorted_distillation_qubit = distillation_qubits.to_vec();
+        sorted_distillation_qubit.sort();
+        assert_eq!(sorted_distillation_qubit, positions_in_states);
+
+        states
     }
 
     fn register_initial_state(&mut self, occupancy: BoardOccupancy) {
@@ -187,7 +321,27 @@ impl Runner {
                         },
                     );
                 }
-                SingleQubitPiOver8RotationBlock { .. } => unimplemented!(),
+                SingleQubitPiOver8RotationBlock {
+                    target,
+                    routing_qubits,
+                    distillation_qubits,
+                    ..
+                } => {
+                    self.pi_over_8_rotation_block_states
+                        .entry(id)
+                        .or_insert_with(|| {
+                            let distillation_states = Self::new_distillation_states(
+                                target,
+                                routing_qubits,
+                                distillation_qubits,
+                            );
+                            SingleQubitPiOver8RotationBlockState::PiOver8Rotation {
+                                index: 0,
+                                lattice_surgery_steps: None,
+                                distillation_steps: distillation_states,
+                            }
+                        });
+                }
             }
         }
     }
@@ -258,7 +412,6 @@ impl Runner {
         }
     }
 
-    // Returns true when this state must be removed.
     fn perform_pi_over_8_rotation_state_transition(&mut self) {
         use BoardOccupancy::*;
         use OperationWithAdditionalData::*;
@@ -316,6 +469,54 @@ impl Runner {
         self.removed_operation_ids.extend(to_be_removed.iter());
         for id in to_be_removed {
             self.pi_over_8_rotation_states.remove(&id);
+        }
+    }
+
+    fn perform_pi_over_8_rotation_block_state_transition(&mut self) {
+        use OperationWithAdditionalData::*;
+        let mut to_be_removed = vec![];
+        for (id, state) in &mut self.pi_over_8_rotation_block_states {
+            let op = &self.operations[id];
+            let pi_over_8_axes = match op {
+                SingleQubitPiOver8RotationBlock { pi_over_8_axes, .. } => pi_over_8_axes,
+                _ => unreachable!(),
+            };
+            loop {
+                match state {
+                    SingleQubitPiOver8RotationBlockState::PiOver8Rotation {
+                        index,
+                        lattice_surgery_steps,
+                        distillation_steps,
+                    } => {
+                        if let Some(steps) = lattice_surgery_steps {
+                            if *steps == self.conf.code_distance {
+                                for site in distillation_steps.iter_mut() {
+                                    if site.is_involved_with_lattice_surgery {
+                                        site.renew();
+                                    }
+                                }
+                                *lattice_surgery_steps = None;
+                                *index += 1;
+                            }
+                        }
+                        if *index as usize == pi_over_8_axes.len() {
+                            *state = SingleQubitPiOver8RotationBlockState::Correction { steps: 0 };
+                            continue;
+                        }
+                    }
+                    SingleQubitPiOver8RotationBlockState::Correction { steps } => {
+                        let distance = self.conf.code_distance;
+                        if *steps == 2 * distance + y_measurement_cost(distance) {
+                            to_be_removed.push(*id);
+                        }
+                    }
+                }
+                break;
+            }
+        }
+        self.removed_operation_ids.extend(to_be_removed.iter());
+        for id in to_be_removed {
+            self.pi_over_8_rotation_block_states.remove(&id);
         }
     }
 
@@ -390,7 +591,7 @@ impl Runner {
                         #[allow(clippy::collapsible_if)]
                         if *steps >= self.conf.magic_state_distillation_cost {
                             let success_rate = self.conf.magic_state_distillation_success_rate;
-                            if rng.gen_range(0.0..1.0) < success_rate {
+                            if rng.gen_range(0.0..1.0) <= success_rate {
                                 *has_magic_state = true;
                             }
                             *steps = 0;
@@ -423,37 +624,372 @@ impl Runner {
         }
     }
 
-    fn run_internal<R: Rng>(&mut self, rng: &mut R) -> u32 {
+    // Calculates the minimal cost to transfer a magic state to the routing area, and returns
+    // the distillation state and the path, if there is one.
+    // The path does not include both endpoints (the routing area and the magic state).
+    // Every position in the returned path must be contained in `available_positions`.
+    fn get_ready_magic_state<'a>(
+        routing_qubits: &[Position],
+        distillation_steps: &'a mut [DistillationState],
+        available_positions: &[Position],
+        conf: &Configuration,
+    ) -> Option<(&'a mut DistillationState, Vec<Position>)> {
+        use PatchDirection::*;
+        #[derive(Clone, Debug, Eq, PartialEq)]
+        struct State {
+            cost: u32,
+            distance: u32,
+            position: Position,
+            prev: Option<usize>,
+        }
+        impl State {
+            fn new(cost: u32, distance: u32, position: Position, prev: Option<usize>) -> Self {
+                State {
+                    cost,
+                    distance,
+                    position,
+                    prev,
+                }
+            }
+        }
+        impl PartialOrd for State {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+        impl Ord for State {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                // We use `reverse` here because BinaryHeap is a max heap.
+                self.cost.cmp(&other.cost).reverse()
+            }
+        }
+
+        let mut q = BinaryHeap::new();
+
+        for pos in routing_qubits {
+            q.push(State::new(0, 0, *pos, None));
+        }
+
+        let mut cost_table: Vec<State> = vec![];
+        while let Some(state) = q.pop() {
+            if cost_table.iter().any(|s| s.position == state.position) {
+                continue;
+            }
+            let prev = cost_table.len();
+            cost_table.push(state.clone());
+
+            let mut push = |pos| {
+                if !available_positions.contains(&pos) {
+                    return;
+                }
+                let index = match distillation_steps.iter().position(|s| s.position == pos) {
+                    Some(index) => index,
+                    None => return,
+                };
+                let distillation_state = &distillation_steps[index];
+                let failure_rate = 1.0 - conf.magic_state_distillation_success_rate;
+                let steps = distillation_state.steps;
+                let cost_to_discard_distillation = if steps == conf.magic_state_distillation_cost {
+                    (steps as f64 / (failure_rate * failure_rate)).ceil() as u32
+                } else {
+                    steps
+                };
+                let cost = state.cost + cost_to_discard_distillation;
+                let distance = state.distance + 1;
+
+                q.push(State::new(cost, distance, pos, Some(prev)));
+            };
+
+            let pos = state.position;
+            if pos.x > 0 {
+                push(Position::new(pos.x - 1, pos.y));
+            }
+            if pos.y > 0 {
+                push(Position::new(pos.x, pos.y - 1));
+            }
+            push(Position::new(pos.x + 1, pos.y));
+            push(Position::new(pos.x, pos.y + 1));
+        }
+
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct Candidate {
+            cost: u32,
+            distance: u32,
+            index: usize,
+            cost_table_index: usize,
+        }
+        impl Ord for Candidate {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                self.cost
+                    .cmp(&other.cost)
+                    .then(self.distance.cmp(&other.distance).reverse())
+            }
+        }
+        impl PartialOrd for Candidate {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        let mut candidate: Option<Candidate> = None;
+        for (index, state) in distillation_steps.iter().enumerate() {
+            if !state.is_ready(conf) {
+                continue;
+            }
+            let mut update_candidate = |pos| {
+                let cost_table_index = match cost_table.iter().position(|s| s.position == pos) {
+                    Some(index) => index,
+                    None => return,
+                };
+
+                let cost = cost_table[cost_table_index].cost;
+                let distance = cost_table[cost_table_index].distance;
+                let new_candidate = Candidate {
+                    cost,
+                    distance,
+                    index,
+                    cost_table_index,
+                };
+                candidate = match &candidate {
+                    Some(candidate) => Some(std::cmp::min(candidate.clone(), new_candidate)),
+                    None => Some(new_candidate),
+                };
+            };
+
+            let pos = state.position;
+            match state.direction {
+                HorizontalZBoundary => {
+                    if pos.y > 0 {
+                        update_candidate(Position::new(pos.x, pos.y - 1));
+                    }
+                    update_candidate(Position::new(pos.x, pos.y + 1));
+                }
+                VerticalZBoundary => {
+                    if pos.x > 0 {
+                        update_candidate(Position::new(pos.x - 1, pos.y));
+                    }
+                    update_candidate(Position::new(pos.x + 1, pos.y));
+                }
+            }
+        }
+
+        match candidate {
+            None => None,
+            Some(candidate) => {
+                let mut path = vec![];
+                let mut state: &State = &cost_table[candidate.cost_table_index];
+                loop {
+                    path.push(state.position);
+                    state = if let Some(prev) = state.prev {
+                        &cost_table[prev]
+                    } else {
+                        break;
+                    };
+                }
+                assert!(!path.is_empty());
+                path.remove(path.len() - 1);
+                path.reverse();
+
+                Some((&mut distillation_steps[candidate.index], path))
+            }
+        }
+    }
+
+    fn process_pi_over_8_rotation_block<R: Rng>(&mut self, rng: &mut R) {
+        use BoardOccupancy::*;
+        for (id, state) in &mut self.pi_over_8_rotation_block_states {
+            let op = &self.operations[id];
+            let (target, routing_qubits, distillation_qubits, correction_qubits) = match op {
+                OperationWithAdditionalData::SingleQubitPiOver8RotationBlock {
+                    target,
+                    routing_qubits,
+                    distillation_qubits,
+                    correction_qubits,
+                    ..
+                } => (target, routing_qubits, distillation_qubits, correction_qubits),
+                _ => unreachable!(),
+            };
+            let is_associated_with_this_op = |occupancy: BoardOccupancy| {
+                matches!(occupancy, PiOver8RotationBlock(id) if id == op.id())
+                    || matches!(occupancy, DataQubitInOperation(id) if id == op.id())
+            };
+            // If the previous occupancy is suitable and the current occupancy is not suitable,
+            // we should add a delay to make the current occupancy suitable.
+            let should_add_delay = |pos: &Position| -> bool {
+                let cycle_on_schedule = self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
+                let prev = if cycle_on_schedule > 0 {
+                    Some(self.schedule[(pos.x, pos.y, cycle_on_schedule - 1)].clone())
+                } else {
+                    None
+                };
+                let current = if cycle_on_schedule < self.end_cycle_at[(pos.x, pos.y)] {
+                    Some(self.schedule[(pos.x, pos.y, cycle_on_schedule)].clone())
+                } else {
+                    None
+                };
+                prev.map_or(false, is_associated_with_this_op)
+                    && !current.map_or(false, is_associated_with_this_op)
+            };
+
+            match state {
+                SingleQubitPiOver8RotationBlockState::PiOver8Rotation {
+                    index: _,
+                    lattice_surgery_steps,
+                    distillation_steps,
+                } => {
+                    // We construct a new Vec to avoid Rust borrow checker complaints.
+                    let positions = std::iter::once(target)
+                        .chain(routing_qubits.iter())
+                        .chain(distillation_qubits.iter())
+                        .cloned()
+                        .filter(should_add_delay)
+                        .collect::<Vec<_>>();
+                    for pos in positions {
+                        self.delay_at[(pos.x, pos.y)] += 1;
+                    }
+                    let is_available = |pos: &Position| {
+                        let cycle_on_schedule = self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
+                        let occupancy = &self.schedule[(pos.x, pos.y, cycle_on_schedule)];
+                        is_associated_with_this_op(occupancy.clone())
+                    };
+
+                    if let Some(steps) = lattice_surgery_steps {
+                        *steps += 1;
+                    } else if is_available(target) && routing_qubits.iter().all(is_available) {
+                        let available_positions = routing_qubits
+                            .iter()
+                            .filter(|p| is_available(p))
+                            .chain(distillation_qubits.iter().filter(|p| is_available(p)))
+                            .cloned()
+                            .collect::<Vec<_>>();
+
+                        // Find a path to connect the routing_area with a magic state, if there is one.
+                        if let Some((distillation_site, path)) = Self::get_ready_magic_state(
+                            routing_qubits,
+                            distillation_steps,
+                            &available_positions,
+                            &self.conf,
+                        ) {
+                            // Consume the magic state.
+                            distillation_site.mark_as_involved_with_lattice_surgery();
+                            for site in distillation_steps.iter_mut() {
+                                if path.contains(&site.position) {
+                                    site.mark_as_involved_with_lattice_surgery();
+                                }
+                            }
+                            *lattice_surgery_steps = Some(1);
+                        }
+                    }
+                    for site in distillation_steps.iter_mut() {
+                        let pos = site.position;
+                        let cycle_on_schedule = self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
+                        let occupancy = &self.schedule[(pos.x, pos.y, cycle_on_schedule)];
+                        if matches!(occupancy, PiOver8RotationBlock(id) if *id == op.id()) {
+                            site.run_distillation(rng, &self.conf);
+                        }
+                    }
+                }
+                SingleQubitPiOver8RotationBlockState::Correction { steps } => {
+                    let distance = self.conf.code_distance;
+                    let y_measurement_cost = y_measurement_cost(distance);
+                    assert!(y_measurement_cost <= distance);
+                    assert_eq!(correction_qubits.len(), 3);
+
+                    let active_qubits = if *steps < distance + y_measurement_cost {
+                        std::iter::once(target)
+                            .chain(routing_qubits)
+                            .chain(std::iter::once(&correction_qubits[0]))
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    } else if *steps < 2 * distance {
+                        std::iter::once(target)
+                            .chain(routing_qubits)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    } else {
+                        correction_qubits
+                            .iter()
+                            .skip(1)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    };
+
+                    let inactive_qubits = std::iter::once(target)
+                        .chain(routing_qubits)
+                        .chain(distillation_qubits)
+                        .cloned()
+                        .filter(|pos| !active_qubits.contains(pos))
+                        .collect::<Vec<_>>();
+
+                    let positions = active_qubits
+                        .iter()
+                        .filter(|p| should_add_delay(p))
+                        .collect::<Vec<_>>();
+                    for pos in positions {
+                        self.delay_at[(pos.x, pos.y)] += 1;
+                    }
+
+                    for pos in inactive_qubits {
+                        let cycle_on_schedule = self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
+                        let o = self.schedule[(pos.x, pos.y, cycle_on_schedule)].clone();
+                        if is_associated_with_this_op(o) && self.delay_at[(pos.x, pos.y)] > 0 {
+                            self.delay_at[(pos.x, pos.y)] -= 1;
+                        }
+                    }
+
+                    *steps += 1;
+                }
+            }
+        }
+    }
+
+    // `suppress_delay_reduction` can be true only for testing.
+    fn run_internal_step<R: Rng>(&mut self, rng: &mut R, suppress_delay_reduction: bool) {
         let width = self.schedule.width;
         let height = self.schedule.height;
-        loop {
-            let runtime_cycle = self.runtime_cycle;
-            for (x, y) in range_2d(width, height) {
+        let runtime_cycle = self.runtime_cycle;
+        for (x, y) in range_2d(width, height) {
+            if !suppress_delay_reduction {
                 // Decrease the delay on idle qubits.
-                while runtime_cycle - self.delay_at[(x, y)] < self.end_cycle_at[(x, y)] {
-                    let cycle_on_schedule = runtime_cycle - self.delay_at[(x, y)];
+                let delay = &mut self.delay_at[(x, y)];
+                while *delay > 0 && runtime_cycle - *delay < self.end_cycle_at[(x, y)] {
+                    let cycle_on_schedule = runtime_cycle - *delay;
                     let occupancy = &self.schedule[(x, y, cycle_on_schedule)];
-                    if occupancy.is_vacant_or_idle() && self.delay_at[(x, y)] > 0 {
-                        self.delay_at[(x, y)] -= 1;
+                    let is_idle = occupancy.is_vacant_or_idle()
+                        || occupancy
+                            .operation_id()
+                            .map_or(false, |id| self.removed_operation_ids.contains(&id));
+                    if is_idle {
+                        *delay -= 1;
                     } else {
                         break;
                     }
                 }
-
-                let cycle_on_schedule = runtime_cycle - self.delay_at[(x, y)];
-                if cycle_on_schedule < self.end_cycle_at[(x, y)] {
-                    let occupancy = self.schedule[(x, y, cycle_on_schedule)].clone();
-                    self.register_initial_state(occupancy);
-                }
             }
 
-            self.perform_pi_over_4_rotation_state_transition();
-            self.perform_pi_over_8_rotation_state_transition();
-            self.process_pi_over_4_rotation();
-            self.process_pi_over_8_rotation(rng);
+            let cycle_on_schedule = runtime_cycle - self.delay_at[(x, y)];
+            if cycle_on_schedule < self.end_cycle_at[(x, y)] {
+                let occupancy = self.schedule[(x, y, cycle_on_schedule)].clone();
+                self.register_initial_state(occupancy);
+            }
+        }
+
+        self.perform_pi_over_4_rotation_state_transition();
+        self.perform_pi_over_8_rotation_state_transition();
+        self.perform_pi_over_8_rotation_block_state_transition();
+        self.process_pi_over_4_rotation();
+        self.process_pi_over_8_rotation(rng);
+        self.process_pi_over_8_rotation_block(rng);
+    }
+
+    fn run_internal<R: Rng>(&mut self, rng: &mut R) -> u32 {
+        let width = self.schedule.width;
+        let height = self.schedule.height;
+        loop {
+            self.run_internal_step(rng, false);
 
             if range_2d(width, height).all(|(x, y)| {
-                let cycle_on_schedule = runtime_cycle - self.delay_at[(x, y)];
+                let cycle_on_schedule = self.runtime_cycle - self.delay_at[(x, y)];
                 cycle_on_schedule >= self.end_cycle_at[(x, y)]
             }) {
                 break;
@@ -558,6 +1094,7 @@ mod tests {
             runtime_cycle: 0,
             pi_over_4_rotation_states: HashMap::new(),
             pi_over_8_rotation_states: HashMap::new(),
+            pi_over_8_rotation_block_states: HashMap::new(),
             removed_operation_ids: HashSet::new(),
         }
     }
@@ -1195,5 +1732,1880 @@ mod tests {
         let result = runner.run_internal(&mut rng);
         assert_eq!(result, 11);
         assert_eq!(rng.counter, 2);
+    }
+
+    #[test]
+    fn test_delay_reduction_with_completed_op() {
+        use BoardOccupancy::*;
+        let end_cycle = 10_u32;
+        let mut rng = RngForTesting::new_unusable();
+        let conf = Configuration {
+            width: 4,
+            height: 4,
+            code_distance: 5,
+            magic_state_distillation_cost: 13,
+            num_distillations_for_pi_over_8_rotation: 5,
+            magic_state_distillation_success_rate: 0.5,
+        };
+
+        let mut mapping = DataQubitMapping::new(conf.width, conf.height);
+        let q0 = Qubit::new(0);
+        let q1 = Qubit::new(1);
+        mapping.map(q0, 1, 1);
+        mapping.map(q1, 2, 2);
+
+        let id = OperationId::new(0);
+        let op = OperationWithAdditionalData::SingleQubitPiOver8RotationBlock {
+            id,
+            target: Position::new(1, 1),
+            routing_qubits: vec![Position::new(1, 0)],
+            distillation_qubits: vec![Position::new(2, 0), Position::new(3, 0)],
+            correction_qubits: vec![],
+            pi_over_4_axes: vec![],
+            pi_over_8_axes: vec![Pauli::Z],
+        };
+        let next_id = OperationId::new(1);
+        let next_op = OperationWithAdditionalData::PiOver4Rotation {
+            id: next_id,
+            targets: vec![(Position::new(1, 1), Pauli::Z)],
+            ancilla_qubits: vec![
+                Position::new(1, 0),
+                Position::new(2, 0),
+                Position::new(3, 0),
+            ],
+        };
+
+        let operations = vec![op, next_op];
+
+        let mut schedule = new_occupancy_map(
+            conf.width,
+            conf.height,
+            end_cycle,
+            &[mapping.get(q0).unwrap(), mapping.get(q1).unwrap()],
+        );
+        set_occupancy(&mut schedule, 1, 1, 0..8, DataQubitInOperation(id));
+        set_occupancy(&mut schedule, 1, 0, 0..8, LatticeSurgery(next_id));
+        set_occupancy(&mut schedule, 2, 0, 0..8, PiOver8RotationBlock(id));
+        set_occupancy(&mut schedule, 3, 0, 0..8, PiOver8RotationBlock(id));
+
+        set_occupancy(&mut schedule, 1, 1, 8..9, DataQubitInOperation(next_id));
+        set_occupancy(&mut schedule, 1, 0, 8..9, LatticeSurgery(next_id));
+        set_occupancy(&mut schedule, 2, 0, 8..9, LatticeSurgery(next_id));
+        set_occupancy(&mut schedule, 3, 0, 8..9, LatticeSurgery(next_id));
+
+        let mut runner = new_runner(operations, schedule, &conf);
+
+        runner.delay_at[(1, 1)] = 7;
+        runner.delay_at[(1, 0)] = 8;
+        runner.delay_at[(2, 0)] = 2;
+        runner.delay_at[(3, 0)] = 8;
+        runner.removed_operation_ids.insert(id);
+
+        runner.runtime_cycle = 8;
+        runner.run_internal_step(&mut rng, false);
+
+        assert_eq!(runner.delay_at[(0, 0)], 0);
+        assert_eq!(runner.delay_at[(1, 0)], 8);
+        assert_eq!(runner.delay_at[(1, 1)], 0);
+        assert_eq!(runner.delay_at[(2, 0)], 0);
+        assert_eq!(runner.delay_at[(3, 0)], 0);
+    }
+
+    #[test]
+    fn test_get_ready_magic_state_none() {
+        use PatchDirection::*;
+        let conf = Configuration {
+            width: 4,
+            height: 4,
+            code_distance: 5,
+            magic_state_distillation_cost: 13,
+            num_distillations_for_pi_over_8_rotation: 5,
+            magic_state_distillation_success_rate: 0.5,
+        };
+        let routing_qubits = vec![
+            Position::new(1, 0),
+            Position::new(2, 0),
+            Position::new(2, 1),
+        ];
+        let mut distillation_steps = vec![
+            DistillationState {
+                position: Position::new(3, 0),
+                steps: 2,
+                direction: VerticalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+            DistillationState {
+                position: Position::new(3, 1),
+                steps: 12,
+                direction: VerticalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+        ];
+        let available_positions = vec![
+            Position::new(1, 0),
+            Position::new(2, 0),
+            Position::new(2, 1),
+            Position::new(3, 0),
+            Position::new(3, 1),
+        ];
+        let result = Runner::get_ready_magic_state(
+            &routing_qubits,
+            &mut distillation_steps,
+            &available_positions,
+            &conf,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_get_ready_magic_state() {
+        use PatchDirection::*;
+        let conf = Configuration {
+            width: 4,
+            height: 4,
+            code_distance: 5,
+            magic_state_distillation_cost: 13,
+            num_distillations_for_pi_over_8_rotation: 5,
+            magic_state_distillation_success_rate: 0.5,
+        };
+        let routing_qubits = vec![
+            Position::new(1, 0),
+            Position::new(2, 0),
+            Position::new(2, 1),
+        ];
+        let mut distillation_steps = vec![
+            DistillationState {
+                position: Position::new(0, 0),
+                steps: 4,
+                direction: VerticalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+            DistillationState {
+                position: Position::new(0, 1),
+                steps: 3,
+                direction: HorizontalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+            DistillationState {
+                position: Position::new(0, 2),
+                steps: 13,
+                direction: HorizontalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+            DistillationState {
+                position: Position::new(3, 0),
+                steps: 2,
+                direction: VerticalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+            DistillationState {
+                position: Position::new(3, 1),
+                steps: 12,
+                direction: VerticalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+            DistillationState {
+                position: Position::new(3, 2),
+                steps: 13,
+                direction: HorizontalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+        ];
+        let available_positions = vec![
+            Position::new(1, 0),
+            Position::new(2, 0),
+            Position::new(2, 1),
+            Position::new(0, 0),
+            Position::new(0, 1),
+            Position::new(0, 2),
+            Position::new(3, 0),
+            Position::new(3, 1),
+            Position::new(3, 2),
+        ];
+
+        let result = Runner::get_ready_magic_state(
+            &routing_qubits,
+            &mut distillation_steps,
+            &available_positions,
+            &conf,
+        );
+
+        if let Some((distillation_state, path)) = result {
+            assert_eq!(distillation_state.position, Position::new(0, 2));
+            assert_eq!(distillation_state.steps, 13);
+            assert_eq!(distillation_state.direction, HorizontalZBoundary);
+            assert_eq!(path, vec![Position::new(0, 0), Position::new(0, 1)]);
+        } else {
+            unreachable!("test failed");
+        }
+    }
+
+    #[test]
+    fn test_get_ready_magic_state_prioritizing_long_path_when_cost_matches() {
+        use PatchDirection::*;
+        let conf = Configuration {
+            width: 5,
+            height: 4,
+            code_distance: 5,
+            magic_state_distillation_cost: 13,
+            num_distillations_for_pi_over_8_rotation: 5,
+            magic_state_distillation_success_rate: 0.5,
+        };
+        let routing_qubits = vec![
+            Position::new(1, 0),
+            Position::new(0, 1),
+            Position::new(1, 1),
+        ];
+        let mut distillation_steps = vec![
+            DistillationState {
+                position: Position::new(2, 0),
+                steps: 4,
+                direction: VerticalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+            DistillationState {
+                position: Position::new(3, 0),
+                steps: 13,
+                direction: VerticalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+            DistillationState {
+                position: Position::new(2, 1),
+                steps: 2,
+                direction: VerticalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+            DistillationState {
+                position: Position::new(3, 1),
+                steps: 2,
+                direction: VerticalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+            DistillationState {
+                position: Position::new(4, 1),
+                steps: 13,
+                direction: VerticalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+        ];
+        let available_positions = vec![
+            Position::new(1, 0),
+            Position::new(0, 1),
+            Position::new(1, 1),
+            Position::new(2, 0),
+            Position::new(3, 0),
+            Position::new(2, 1),
+            Position::new(3, 1),
+            Position::new(4, 1),
+        ];
+
+        let result = Runner::get_ready_magic_state(
+            &routing_qubits,
+            &mut distillation_steps,
+            &available_positions,
+            &conf,
+        );
+
+        if let Some((distillation_state, path)) = result {
+            assert_eq!(distillation_state.position, Position::new(4, 1));
+            assert_eq!(distillation_state.steps, 13);
+            assert_eq!(distillation_state.direction, VerticalZBoundary);
+            assert_eq!(path, vec![Position::new(2, 1), Position::new(3, 1)]);
+        } else {
+            unreachable!("test failed");
+        }
+    }
+
+    #[test]
+    fn test_get_ready_magic_state_direction_is_taken_into_account() {
+        use PatchDirection::*;
+        let conf = Configuration {
+            width: 5,
+            height: 4,
+            code_distance: 5,
+            magic_state_distillation_cost: 13,
+            num_distillations_for_pi_over_8_rotation: 5,
+            magic_state_distillation_success_rate: 0.5,
+        };
+        let routing_qubits = vec![
+            Position::new(1, 0),
+            Position::new(0, 1),
+            Position::new(1, 1),
+        ];
+        let mut distillation_steps = vec![
+            DistillationState {
+                position: Position::new(3, 0),
+                steps: 13,
+                direction: VerticalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+            DistillationState {
+                position: Position::new(4, 0),
+                steps: 12,
+                direction: HorizontalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+            DistillationState {
+                position: Position::new(2, 1),
+                steps: 0,
+                direction: VerticalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+            DistillationState {
+                position: Position::new(3, 1),
+                steps: 0,
+                direction: VerticalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+            DistillationState {
+                position: Position::new(4, 1),
+                steps: 12,
+                direction: VerticalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+        ];
+        let available_positions = vec![
+            Position::new(1, 0),
+            Position::new(0, 1),
+            Position::new(1, 1),
+            Position::new(3, 0),
+            Position::new(4, 0),
+            Position::new(2, 1),
+            Position::new(3, 1),
+            Position::new(4, 1),
+        ];
+
+        let result = Runner::get_ready_magic_state(
+            &routing_qubits,
+            &mut distillation_steps,
+            &available_positions,
+            &conf,
+        );
+
+        if let Some((distillation_state, path)) = result {
+            assert_eq!(distillation_state.position, Position::new(3, 0));
+            assert_eq!(distillation_state.steps, 13);
+            assert_eq!(distillation_state.direction, VerticalZBoundary);
+            assert_eq!(
+                path,
+                vec![
+                    Position::new(2, 1),
+                    Position::new(3, 1),
+                    Position::new(4, 1),
+                    Position::new(4, 0)
+                ]
+            );
+        } else {
+            unreachable!("test failed");
+        }
+    }
+
+    #[test]
+    fn test_get_ready_magic_state_with_nontrivial_available_positions() {
+        use PatchDirection::*;
+        let conf = Configuration {
+            width: 5,
+            height: 4,
+            code_distance: 5,
+            magic_state_distillation_cost: 13,
+            num_distillations_for_pi_over_8_rotation: 5,
+            magic_state_distillation_success_rate: 0.5,
+        };
+        let routing_qubits = vec![Position::new(1, 0), Position::new(2, 0)];
+        let mut distillation_steps = vec![
+            DistillationState {
+                position: Position::new(0, 0),
+                steps: 12,
+                direction: VerticalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+            DistillationState {
+                position: Position::new(0, 1),
+                steps: 13,
+                direction: VerticalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+            DistillationState {
+                position: Position::new(3, 0),
+                steps: 2,
+                direction: VerticalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+            DistillationState {
+                position: Position::new(3, 1),
+                steps: 10,
+                direction: VerticalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+            DistillationState {
+                position: Position::new(4, 0),
+                steps: 0,
+                direction: HorizontalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+            DistillationState {
+                position: Position::new(4, 1),
+                steps: 12,
+                direction: HorizontalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+            DistillationState {
+                position: Position::new(5, 0),
+                steps: 1,
+                direction: HorizontalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+            DistillationState {
+                position: Position::new(5, 1),
+                steps: 12,
+                direction: HorizontalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+            DistillationState {
+                position: Position::new(5, 2),
+                steps: 13,
+                direction: HorizontalZBoundary,
+                is_involved_with_lattice_surgery: false,
+            },
+        ];
+        let available_positions = vec![
+            Position::new(2, 0),
+            Position::new(0, 1),
+            Position::new(3, 0),
+            Position::new(3, 1),
+            Position::new(4, 1),
+            Position::new(5, 0),
+            Position::new(5, 1),
+            Position::new(5, 2),
+        ];
+
+        let result = Runner::get_ready_magic_state(
+            &routing_qubits,
+            &mut distillation_steps,
+            &available_positions,
+            &conf,
+        );
+        if let Some((distillation_state, path)) = result {
+            assert_eq!(distillation_state.position, Position::new(5, 2));
+            assert_eq!(distillation_state.steps, 13);
+            assert_eq!(distillation_state.direction, HorizontalZBoundary);
+            assert_eq!(
+                path,
+                vec![
+                    Position::new(3, 0),
+                    Position::new(3, 1),
+                    Position::new(4, 1),
+                    Position::new(5, 1)
+                ]
+            );
+        } else {
+            unreachable!("test failed");
+        }
+    }
+
+    #[test]
+    fn test_register_initial_state_for_pi_over_8_rotation_block() {
+        use BoardOccupancy::*;
+        use OperationWithAdditionalData::*;
+        use PatchDirection::*;
+        let end_cycle = 30_u32;
+        let conf = Configuration {
+            width: 4,
+            height: 4,
+            code_distance: 5,
+            magic_state_distillation_cost: 13,
+            num_distillations_for_pi_over_8_rotation: 5,
+            magic_state_distillation_success_rate: 0.5,
+        };
+
+        let mut mapping = DataQubitMapping::new(conf.width, conf.height);
+        let q0 = Qubit::new(0);
+        let q1 = Qubit::new(1);
+        mapping.map(q0, 0, 0);
+        mapping.map(q1, 2, 3);
+        let id = OperationId::new(0);
+
+        let operations = vec![SingleQubitPiOver8RotationBlock {
+            id,
+            target: Position::new(0, 0),
+            routing_qubits: vec![
+                Position::new(1, 0),
+                Position::new(0, 1),
+                Position::new(1, 1),
+            ],
+            distillation_qubits: vec![
+                Position::new(2, 0),
+                Position::new(0, 2),
+                Position::new(2, 1),
+                Position::new(3, 0),
+            ],
+            correction_qubits: vec![
+                Position::new(2, 1),
+                Position::new(1, 0),
+                Position::new(0, 1),
+            ],
+            pi_over_8_axes: vec![Pauli::Z, Pauli::X, Pauli::Z],
+            pi_over_4_axes: vec![],
+        }];
+        let schedule = new_occupancy_map(
+            conf.width,
+            conf.height,
+            end_cycle,
+            &[mapping.get(q0).unwrap(), mapping.get(q1).unwrap()],
+        );
+        let mut runner = new_runner(operations, schedule, &conf);
+
+        runner.register_initial_state(PiOver8RotationBlock(id));
+        assert_eq!(runner.pi_over_8_rotation_block_states.len(), 1);
+        let state = runner.pi_over_8_rotation_block_states.get(&id).unwrap();
+        match state {
+            SingleQubitPiOver8RotationBlockState::PiOver8Rotation {
+                index,
+                lattice_surgery_steps,
+                distillation_steps,
+            } => {
+                assert_eq!(*index, 0);
+                assert_eq!(*lattice_surgery_steps, None);
+                assert_eq!(
+                    *distillation_steps,
+                    vec![
+                        DistillationState {
+                            position: Position::new(2, 0),
+                            steps: 0,
+                            direction: VerticalZBoundary,
+                            is_involved_with_lattice_surgery: false,
+                        },
+                        DistillationState {
+                            position: Position::new(0, 2),
+                            steps: 0,
+                            direction: HorizontalZBoundary,
+                            is_involved_with_lattice_surgery: false,
+                        },
+                        DistillationState {
+                            position: Position::new(2, 1),
+                            steps: 0,
+                            direction: VerticalZBoundary,
+                            is_involved_with_lattice_surgery: false,
+                        },
+                        DistillationState {
+                            position: Position::new(3, 0),
+                            steps: 0,
+                            direction: VerticalZBoundary,
+                            is_involved_with_lattice_surgery: false,
+                        },
+                    ]
+                );
+            }
+            _ => unreachable!("test failed"),
+        }
+    }
+
+    #[test]
+    fn test_process_pi_over_8_block_initial_distillation() {
+        use BoardOccupancy::*;
+        use OperationWithAdditionalData::*;
+        use PatchDirection::*;
+        let end_cycle = 30_u32;
+        let conf = Configuration {
+            width: 4,
+            height: 4,
+            code_distance: 3,
+            magic_state_distillation_cost: 3,
+            num_distillations_for_pi_over_8_rotation: 2,
+            magic_state_distillation_success_rate: 0.5,
+        };
+
+        let mut mapping = DataQubitMapping::new(conf.width, conf.height);
+        let q0 = Qubit::new(0);
+        let q1 = Qubit::new(1);
+        mapping.map(q0, 0, 0);
+        mapping.map(q1, 2, 3);
+        let id = OperationId::new(0);
+        let mut rng = RngForTesting::new_with_zero();
+
+        let operations = vec![SingleQubitPiOver8RotationBlock {
+            id,
+            target: Position::new(0, 0),
+            routing_qubits: vec![
+                Position::new(1, 0),
+                Position::new(0, 1),
+                Position::new(1, 1),
+            ],
+            distillation_qubits: vec![Position::new(2, 0), Position::new(2, 1)],
+            correction_qubits: vec![
+                Position::new(2, 0),
+                Position::new(1, 0),
+                Position::new(0, 1),
+            ],
+            pi_over_8_axes: vec![Pauli::Z, Pauli::X, Pauli::Z],
+            pi_over_4_axes: vec![],
+        }];
+        let mut schedule = new_occupancy_map(
+            conf.width,
+            conf.height,
+            end_cycle,
+            &[mapping.get(q0).unwrap(), mapping.get(q1).unwrap()],
+        );
+        set_occupancy(&mut schedule, 0, 0, 1..10, DataQubitInOperation(id));
+        set_occupancy(&mut schedule, 1, 0, 1..10, PiOver8RotationBlock(id));
+        set_occupancy(&mut schedule, 2, 0, 0..10, PiOver8RotationBlock(id));
+        set_occupancy(&mut schedule, 0, 1, 1..10, PiOver8RotationBlock(id));
+        set_occupancy(&mut schedule, 1, 1, 1..10, PiOver8RotationBlock(id));
+        set_occupancy(&mut schedule, 2, 1, 1..10, PiOver8RotationBlock(id));
+
+        let mut runner = new_runner(operations, schedule, &conf);
+
+        runner.register_initial_state(PiOver8RotationBlock(id));
+        runner.process_pi_over_8_rotation_block(&mut rng);
+
+        assert_eq!(runner.pi_over_8_rotation_block_states.len(), 1);
+        let state = runner.pi_over_8_rotation_block_states.get(&id).unwrap();
+        match state {
+            SingleQubitPiOver8RotationBlockState::PiOver8Rotation {
+                index,
+                lattice_surgery_steps,
+                distillation_steps,
+            } => {
+                assert_eq!(*index, 0);
+                assert_eq!(*lattice_surgery_steps, None);
+                assert_eq!(
+                    *distillation_steps,
+                    vec![
+                        DistillationState {
+                            position: Position::new(2, 0),
+                            steps: 1,
+                            direction: VerticalZBoundary,
+                            is_involved_with_lattice_surgery: false,
+                        },
+                        DistillationState {
+                            position: Position::new(2, 1),
+                            steps: 0,
+                            direction: VerticalZBoundary,
+                            is_involved_with_lattice_surgery: false,
+                        },
+                    ]
+                );
+            }
+            _ => unreachable!("test failed"),
+        }
+
+        runner.runtime_cycle += 1;
+        runner.process_pi_over_8_rotation_block(&mut rng);
+
+        assert_eq!(runner.pi_over_8_rotation_block_states.len(), 1);
+        let state = runner.pi_over_8_rotation_block_states.get(&id).unwrap();
+        match state {
+            SingleQubitPiOver8RotationBlockState::PiOver8Rotation {
+                index,
+                lattice_surgery_steps,
+                distillation_steps,
+            } => {
+                assert_eq!(*index, 0);
+                assert_eq!(*lattice_surgery_steps, None);
+                assert_eq!(
+                    *distillation_steps,
+                    vec![
+                        DistillationState {
+                            position: Position::new(2, 0),
+                            steps: 2,
+                            direction: VerticalZBoundary,
+                            is_involved_with_lattice_surgery: false,
+                        },
+                        DistillationState {
+                            position: Position::new(2, 1),
+                            steps: 1,
+                            direction: VerticalZBoundary,
+                            is_involved_with_lattice_surgery: false,
+                        },
+                    ]
+                );
+            }
+            _ => unreachable!("test failed"),
+        }
+    }
+
+    #[test]
+    fn test_process_pi_over_8_block_without_delay() {
+        use BoardOccupancy::*;
+        use OperationWithAdditionalData::*;
+        use PatchDirection::*;
+        let end_cycle = 30_u32;
+        let conf = Configuration {
+            width: 4,
+            height: 4,
+            code_distance: 3,
+            magic_state_distillation_cost: 3,
+            num_distillations_for_pi_over_8_rotation: 2,
+            magic_state_distillation_success_rate: 0.5,
+        };
+
+        let mut mapping = DataQubitMapping::new(conf.width, conf.height);
+        let q0 = Qubit::new(0);
+        let q1 = Qubit::new(1);
+        mapping.map(q0, 0, 0);
+        mapping.map(q1, 2, 3);
+        let id = OperationId::new(0);
+        let mut rng = RngForTesting::new_with_zero();
+
+        let operations = vec![SingleQubitPiOver8RotationBlock {
+            id,
+            target: Position::new(0, 0),
+            routing_qubits: vec![
+                Position::new(1, 0),
+                Position::new(0, 1),
+                Position::new(1, 1),
+            ],
+            distillation_qubits: vec![Position::new(2, 0), Position::new(2, 1)],
+            correction_qubits: vec![
+                Position::new(2, 0),
+                Position::new(1, 0),
+                Position::new(0, 1),
+            ],
+            pi_over_8_axes: vec![Pauli::Z, Pauli::X],
+            pi_over_4_axes: vec![],
+        }];
+        let mut schedule = new_occupancy_map(
+            conf.width,
+            conf.height,
+            end_cycle,
+            &[mapping.get(q0).unwrap(), mapping.get(q1).unwrap()],
+        );
+        set_occupancy(&mut schedule, 0, 0, 1..20, DataQubitInOperation(id));
+        set_occupancy(&mut schedule, 1, 0, 1..20, PiOver8RotationBlock(id));
+        set_occupancy(&mut schedule, 2, 0, 0..20, PiOver8RotationBlock(id));
+        set_occupancy(&mut schedule, 0, 1, 1..20, PiOver8RotationBlock(id));
+        set_occupancy(&mut schedule, 1, 1, 1..20, PiOver8RotationBlock(id));
+        set_occupancy(&mut schedule, 2, 1, 1..20, PiOver8RotationBlock(id));
+
+        let mut runner = new_runner(operations, schedule, &conf);
+        use SingleQubitPiOver8RotationBlockState::Correction as C;
+        use SingleQubitPiOver8RotationBlockState::PiOver8Rotation as S;
+        let expectation = vec![
+            S {
+                index: 0,
+                lattice_surgery_steps: None,
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 1,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: None,
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 1,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: None,
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 3,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: Some(1),
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: true,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 3,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: Some(2),
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: true,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 3,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: Some(3),
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: true,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 3,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                index: 1,
+                lattice_surgery_steps: Some(1),
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 1,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: true,
+                    },
+                ],
+            },
+            S {
+                index: 1,
+                lattice_surgery_steps: Some(2),
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: true,
+                    },
+                ],
+            },
+            S {
+                index: 1,
+                lattice_surgery_steps: Some(3),
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 3,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: true,
+                    },
+                ],
+            },
+            C { steps: 1 },
+            C { steps: 2 },
+            C { steps: 3 },
+            C { steps: 4 },
+            C { steps: 5 },
+            C { steps: 6 },
+            C { steps: 7 },
+            C { steps: 8 },
+            C { steps: 9 },
+        ];
+
+        for e in expectation.iter() {
+            runner.run_internal_step(&mut rng, false);
+            let state = runner.pi_over_8_rotation_block_states.get(&id).unwrap();
+            assert_eq!(state, e);
+            runner.runtime_cycle += 1;
+        }
+
+        assert_eq!(runner.pi_over_8_rotation_block_states.len(), 1);
+        runner.perform_pi_over_8_rotation_block_state_transition();
+        assert_eq!(runner.pi_over_8_rotation_block_states.len(), 0);
+        assert!(runner.removed_operation_ids.contains(&id));
+    }
+
+    #[test]
+    fn test_process_pi_over_8_block_with_incoming_delay_on_distillation_qubits() {
+        use BoardOccupancy::*;
+        use OperationWithAdditionalData::*;
+        use PatchDirection::*;
+        let end_cycle = 30_u32;
+        let conf = Configuration {
+            width: 3,
+            height: 3,
+            code_distance: 3,
+            magic_state_distillation_cost: 2,
+            num_distillations_for_pi_over_8_rotation: 2,
+            magic_state_distillation_success_rate: 0.5,
+        };
+
+        let mut mapping = DataQubitMapping::new(conf.width, conf.height);
+        let q0 = Qubit::new(0);
+        mapping.map(q0, 0, 0);
+        let id0 = OperationId::new(0);
+        let mut rng = RngForTesting::new_with_zero();
+
+        let operations = vec![SingleQubitPiOver8RotationBlock {
+            id: id0,
+            target: Position::new(0, 0),
+            routing_qubits: vec![
+                Position::new(1, 0),
+                Position::new(0, 1),
+                Position::new(1, 1),
+            ],
+            distillation_qubits: vec![Position::new(2, 0), Position::new(2, 1)],
+            correction_qubits: vec![
+                Position::new(2, 0),
+                Position::new(1, 0),
+                Position::new(0, 1),
+            ],
+            pi_over_8_axes: vec![Pauli::Z],
+            pi_over_4_axes: vec![],
+        }];
+        let mut schedule =
+            new_occupancy_map(conf.width, conf.height, end_cycle, &[mapping.get(q0).unwrap()]);
+
+        set_occupancy(&mut schedule, 0, 0, 5..15, DataQubitInOperation(id0));
+        set_occupancy(&mut schedule, 1, 0, 5..15, PiOver8RotationBlock(id0));
+        set_occupancy(&mut schedule, 2, 0, 5..15, PiOver8RotationBlock(id0));
+        set_occupancy(&mut schedule, 0, 1, 5..15, PiOver8RotationBlock(id0));
+        set_occupancy(&mut schedule, 1, 1, 5..15, PiOver8RotationBlock(id0));
+        set_occupancy(&mut schedule, 2, 1, 5..15, PiOver8RotationBlock(id0));
+
+        let mut runner = new_runner(operations, schedule, &conf);
+        runner.runtime_cycle = 5;
+
+        runner.delay_at[(2, 0)] = 3;
+        runner.delay_at[(2, 1)] = 2;
+
+        use SingleQubitPiOver8RotationBlockState::Correction as C;
+        use SingleQubitPiOver8RotationBlockState::PiOver8Rotation as S;
+        let expectation = vec![
+            S {
+                index: 0,
+                lattice_surgery_steps: None,
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: None,
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: None,
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 1,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: None,
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 1,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: Some(1),
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: true,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: Some(2),
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: true,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: Some(3),
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: true,
+                    },
+                ],
+            },
+            C { steps: 1 },
+            C { steps: 2 },
+            C { steps: 3 },
+            C { steps: 4 },
+            C { steps: 5 },
+            C { steps: 6 },
+            C { steps: 7 },
+            C { steps: 8 },
+            C { steps: 9 },
+        ];
+
+        runner.register_initial_state(PiOver8RotationBlock(id0));
+        for e in expectation.iter() {
+            runner.perform_pi_over_8_rotation_block_state_transition();
+            runner.process_pi_over_8_rotation_block(&mut rng);
+            let state = runner.pi_over_8_rotation_block_states.get(&id0).unwrap();
+            assert_eq!(state, e);
+            runner.runtime_cycle += 1;
+        }
+
+        assert_eq!(runner.pi_over_8_rotation_block_states.len(), 1);
+        runner.perform_pi_over_8_rotation_block_state_transition();
+        assert_eq!(runner.pi_over_8_rotation_block_states.len(), 0);
+        assert!(runner.removed_operation_ids.contains(&id0));
+
+        assert_eq!(runner.delay_at[(0, 0)], 3);
+        assert_eq!(runner.delay_at[(1, 0)], 6);
+        assert_eq!(runner.delay_at[(2, 0)], 3);
+        assert_eq!(runner.delay_at[(0, 1)], 6);
+        assert_eq!(runner.delay_at[(1, 1)], 3);
+        assert_eq!(runner.delay_at[(2, 1)], 0);
+        assert_eq!(runner.delay_at[(0, 2)], 0);
+        assert_eq!(runner.delay_at[(1, 2)], 0);
+        assert_eq!(runner.delay_at[(2, 2)], 0);
+    }
+
+    #[test]
+    fn test_process_pi_over_8_block_with_incoming_delay_on_target_qubit() {
+        use BoardOccupancy::*;
+        use OperationWithAdditionalData::*;
+        use PatchDirection::*;
+        let end_cycle = 30_u32;
+        let conf = Configuration {
+            width: 3,
+            height: 3,
+            code_distance: 3,
+            magic_state_distillation_cost: 2,
+            num_distillations_for_pi_over_8_rotation: 2,
+            magic_state_distillation_success_rate: 0.5,
+        };
+
+        let mut mapping = DataQubitMapping::new(conf.width, conf.height);
+        let q0 = Qubit::new(0);
+        mapping.map(q0, 0, 0);
+        let id = OperationId::new(0);
+        let mut rng = RngForTesting::new_with_zero();
+
+        let operations = vec![SingleQubitPiOver8RotationBlock {
+            id,
+            target: Position::new(0, 0),
+            routing_qubits: vec![
+                Position::new(1, 0),
+                Position::new(0, 1),
+                Position::new(1, 1),
+            ],
+            distillation_qubits: vec![Position::new(2, 0), Position::new(2, 1)],
+            correction_qubits: vec![
+                Position::new(2, 0),
+                Position::new(1, 0),
+                Position::new(0, 1),
+            ],
+            pi_over_8_axes: vec![Pauli::Z],
+            pi_over_4_axes: vec![],
+        }];
+        let mut schedule =
+            new_occupancy_map(conf.width, conf.height, end_cycle, &[mapping.get(q0).unwrap()]);
+
+        set_occupancy(&mut schedule, 0, 0, 5..15, DataQubitInOperation(id));
+        set_occupancy(&mut schedule, 1, 0, 5..15, PiOver8RotationBlock(id));
+        set_occupancy(&mut schedule, 2, 0, 5..15, PiOver8RotationBlock(id));
+        set_occupancy(&mut schedule, 0, 1, 5..15, PiOver8RotationBlock(id));
+        set_occupancy(&mut schedule, 1, 1, 5..15, PiOver8RotationBlock(id));
+        set_occupancy(&mut schedule, 2, 1, 5..15, PiOver8RotationBlock(id));
+
+        let mut runner = new_runner(operations, schedule, &conf);
+        runner.runtime_cycle = 5;
+
+        runner.delay_at[(0, 0)] = 4;
+
+        use SingleQubitPiOver8RotationBlockState::Correction as C;
+        use SingleQubitPiOver8RotationBlockState::PiOver8Rotation as S;
+        let expectation = vec![
+            S {
+                index: 0,
+                lattice_surgery_steps: None,
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 1,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 1,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: None,
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: None,
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: None,
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: Some(1),
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: true,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: Some(2),
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: true,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: Some(3),
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: true,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            C { steps: 1 },
+            C { steps: 2 },
+            C { steps: 3 },
+            C { steps: 4 },
+            C { steps: 5 },
+            C { steps: 6 },
+            C { steps: 7 },
+            C { steps: 8 },
+            C { steps: 9 },
+        ];
+
+        runner.register_initial_state(PiOver8RotationBlock(id));
+        for e in expectation.iter() {
+            runner.perform_pi_over_8_rotation_block_state_transition();
+            runner.process_pi_over_8_rotation_block(&mut rng);
+            let state = runner.pi_over_8_rotation_block_states.get(&id).unwrap();
+            assert_eq!(state, e);
+            runner.runtime_cycle += 1;
+        }
+
+        assert_eq!(runner.pi_over_8_rotation_block_states.len(), 1);
+        runner.perform_pi_over_8_rotation_block_state_transition();
+        assert_eq!(runner.pi_over_8_rotation_block_states.len(), 0);
+        assert!(runner.removed_operation_ids.contains(&id));
+
+        assert_eq!(runner.delay_at[(0, 0)], 3);
+        assert_eq!(runner.delay_at[(1, 0)], 6);
+        assert_eq!(runner.delay_at[(2, 0)], 3);
+        assert_eq!(runner.delay_at[(0, 1)], 6);
+        assert_eq!(runner.delay_at[(1, 1)], 3);
+        assert_eq!(runner.delay_at[(2, 1)], 0);
+        assert_eq!(runner.delay_at[(0, 2)], 0);
+        assert_eq!(runner.delay_at[(1, 2)], 0);
+        assert_eq!(runner.delay_at[(2, 2)], 0);
+    }
+
+    #[test]
+    fn test_process_pi_over_8_block_with_incoming_delay_on_routing_qubit() {
+        use BoardOccupancy::*;
+        use OperationWithAdditionalData::*;
+        use PatchDirection::*;
+        let end_cycle = 30_u32;
+        let conf = Configuration {
+            width: 3,
+            height: 3,
+            code_distance: 3,
+            magic_state_distillation_cost: 2,
+            num_distillations_for_pi_over_8_rotation: 2,
+            magic_state_distillation_success_rate: 0.5,
+        };
+
+        let mut mapping = DataQubitMapping::new(conf.width, conf.height);
+        let q0 = Qubit::new(0);
+        mapping.map(q0, 0, 0);
+        let id = OperationId::new(0);
+        let mut rng = RngForTesting::new_with_zero();
+
+        let operations = vec![SingleQubitPiOver8RotationBlock {
+            id,
+            target: Position::new(0, 0),
+            routing_qubits: vec![
+                Position::new(1, 0),
+                Position::new(0, 1),
+                Position::new(1, 1),
+            ],
+            distillation_qubits: vec![Position::new(2, 0), Position::new(2, 1)],
+            correction_qubits: vec![
+                Position::new(2, 0),
+                Position::new(1, 0),
+                Position::new(0, 1),
+            ],
+            pi_over_8_axes: vec![Pauli::Z],
+            pi_over_4_axes: vec![],
+        }];
+        let mut schedule =
+            new_occupancy_map(conf.width, conf.height, end_cycle, &[mapping.get(q0).unwrap()]);
+
+        set_occupancy(&mut schedule, 0, 0, 5..15, DataQubitInOperation(id));
+        set_occupancy(&mut schedule, 1, 0, 5..15, PiOver8RotationBlock(id));
+        set_occupancy(&mut schedule, 2, 0, 5..15, PiOver8RotationBlock(id));
+        set_occupancy(&mut schedule, 0, 1, 5..15, PiOver8RotationBlock(id));
+        set_occupancy(&mut schedule, 1, 1, 5..15, PiOver8RotationBlock(id));
+        set_occupancy(&mut schedule, 2, 1, 5..15, PiOver8RotationBlock(id));
+
+        let mut runner = new_runner(operations, schedule, &conf);
+        runner.runtime_cycle = 5;
+
+        runner.delay_at[(0, 1)] = 4;
+
+        use SingleQubitPiOver8RotationBlockState::Correction as C;
+        use SingleQubitPiOver8RotationBlockState::PiOver8Rotation as S;
+        let expectation = vec![
+            S {
+                index: 0,
+                lattice_surgery_steps: None,
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 1,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 1,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: None,
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: None,
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: None,
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: Some(1),
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: true,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: Some(2),
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: true,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                index: 0,
+                lattice_surgery_steps: Some(3),
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: true,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            C { steps: 1 },
+            C { steps: 2 },
+            C { steps: 3 },
+            C { steps: 4 },
+            C { steps: 5 },
+            C { steps: 6 },
+            C { steps: 7 },
+            C { steps: 8 },
+            C { steps: 9 },
+        ];
+
+        for e in expectation.iter() {
+            runner.run_internal_step(&mut rng, true);
+            let state = runner.pi_over_8_rotation_block_states.get(&id).unwrap();
+            assert_eq!(state, e);
+            runner.runtime_cycle += 1;
+        }
+
+        assert_eq!(runner.pi_over_8_rotation_block_states.len(), 1);
+        runner.perform_pi_over_8_rotation_block_state_transition();
+        assert_eq!(runner.pi_over_8_rotation_block_states.len(), 0);
+        assert!(runner.removed_operation_ids.contains(&id));
+
+        assert_eq!(runner.delay_at[(0, 0)], 3);
+        assert_eq!(runner.delay_at[(1, 0)], 6);
+        assert_eq!(runner.delay_at[(2, 0)], 3);
+        assert_eq!(runner.delay_at[(0, 1)], 6);
+        assert_eq!(runner.delay_at[(1, 1)], 3);
+        assert_eq!(runner.delay_at[(2, 1)], 0);
+        assert_eq!(runner.delay_at[(0, 2)], 0);
+        assert_eq!(runner.delay_at[(1, 2)], 0);
+        assert_eq!(runner.delay_at[(2, 2)], 0);
+    }
+
+    #[test]
+    fn test_process_pi_over_8_block_with_distillation_failures() {
+        use BoardOccupancy::*;
+        use OperationWithAdditionalData::*;
+        use PatchDirection::*;
+        let end_cycle = 30_u32;
+        let conf = Configuration {
+            width: 4,
+            height: 4,
+            code_distance: 3,
+            magic_state_distillation_cost: 2,
+            num_distillations_for_pi_over_8_rotation: 2,
+            magic_state_distillation_success_rate: 0.5,
+        };
+
+        let mut mapping = DataQubitMapping::new(conf.width, conf.height);
+        let q0 = Qubit::new(0);
+        mapping.map(q0, 0, 0);
+        let prev_id = OperationId::new(0);
+        let id = OperationId::new(1);
+        let mut rng = RngForTesting::new(&[u64::MAX, u64::MAX, 0, 0, u64::MAX]);
+
+        let operations = vec![
+            PiOver4Rotation {
+                id: prev_id,
+                targets: vec![(Position::new(0, 0), Pauli::Z)],
+                ancilla_qubits: vec![Position::new(0, 1), Position::new(1, 1)],
+            },
+            SingleQubitPiOver8RotationBlock {
+                id,
+                target: Position::new(0, 0),
+                routing_qubits: vec![
+                    Position::new(1, 0),
+                    Position::new(0, 1),
+                    Position::new(1, 1),
+                ],
+                distillation_qubits: vec![Position::new(2, 0), Position::new(2, 1)],
+                correction_qubits: vec![
+                    Position::new(2, 0),
+                    Position::new(1, 0),
+                    Position::new(0, 1),
+                ],
+                pi_over_8_axes: vec![Pauli::Z, Pauli::Y],
+                pi_over_4_axes: vec![],
+            },
+        ];
+        let qubit_positions = [mapping.get(q0).unwrap()];
+        let mut schedule = new_occupancy_map(conf.width, conf.height, end_cycle, &qubit_positions);
+
+        set_occupancy(&mut schedule, 0, 0, 0..3, DataQubitInOperation(prev_id));
+        set_occupancy(&mut schedule, 0, 1, 0..3, LatticeSurgery(prev_id));
+        set_occupancy(&mut schedule, 1, 1, 0..3, LatticeSurgery(prev_id));
+
+        set_occupancy(&mut schedule, 0, 0, 3..15, DataQubitInOperation(id));
+        set_occupancy(&mut schedule, 1, 0, 3..18, PiOver8RotationBlock(id));
+        set_occupancy(&mut schedule, 2, 0, 0..15, PiOver8RotationBlock(id));
+        set_occupancy(&mut schedule, 0, 1, 3..18, PiOver8RotationBlock(id));
+        set_occupancy(&mut schedule, 1, 1, 3..15, PiOver8RotationBlock(id));
+        set_occupancy(&mut schedule, 2, 1, 1..9, PiOver8RotationBlock(id));
+
+        let mut runner = new_runner(operations, schedule, &conf);
+
+        use SingleQubitPiOver8RotationBlockState::Correction as C;
+        use SingleQubitPiOver8RotationBlockState::PiOver8Rotation as S;
+        let expectation = vec![
+            S {
+                // runtime_clock = 0
+                index: 0,
+                lattice_surgery_steps: None,
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 1,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                // runtime_clock = 1
+                index: 0,
+                lattice_surgery_steps: None,
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 0, // <= distillation failure
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 1,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                // runtime_clock = 2
+                index: 0,
+                lattice_surgery_steps: None,
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 1,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 0, // <= distillation failure
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                // runtime_clock = 3
+                index: 0,
+                lattice_surgery_steps: None,
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 2, // <= distillation success
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 1,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                // runtime_clock = 4
+                index: 0,
+                lattice_surgery_steps: Some(1),
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: true,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 2, // <= distillation success
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                // runtime_clock = 5
+                index: 0,
+                lattice_surgery_steps: Some(2),
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: true,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                // runtime_clock = 6
+                index: 0,
+                lattice_surgery_steps: Some(3),
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: true,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 2,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                ],
+            },
+            S {
+                // runtime_clock = 7
+                index: 1,
+                lattice_surgery_steps: Some(1),
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 1,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: true,
+                    },
+                ],
+            },
+            S {
+                // runtime_clock = 8
+                index: 1,
+                lattice_surgery_steps: Some(2),
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 0, // <= distillation failure
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: true,
+                    },
+                ],
+            },
+            S {
+                // runtime_clock = 9
+                index: 1,
+                lattice_surgery_steps: Some(3),
+                distillation_steps: vec![
+                    DistillationState {
+                        position: Position::new(2, 0),
+                        steps: 1,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: false,
+                    },
+                    DistillationState {
+                        position: Position::new(2, 1),
+                        steps: 0,
+                        direction: VerticalZBoundary,
+                        is_involved_with_lattice_surgery: true,
+                    },
+                ],
+            },
+            C { steps: 1 },
+            C { steps: 2 },
+            C { steps: 3 },
+            C { steps: 4 },
+            C { steps: 5 },
+            C { steps: 6 },
+            C { steps: 7 },
+            C { steps: 8 },
+            C { steps: 9 },
+        ];
+
+        for e in expectation.iter() {
+            runner.run_internal_step(&mut rng, true);
+            let state = runner.pi_over_8_rotation_block_states.get(&id).unwrap();
+            assert_eq!(state, e);
+            runner.runtime_cycle += 1;
+        }
+
+        assert_eq!(runner.pi_over_8_rotation_block_states.len(), 1);
+        runner.perform_pi_over_8_rotation_block_state_transition();
+        assert_eq!(runner.pi_over_8_rotation_block_states.len(), 0);
+        assert!(runner.removed_operation_ids.contains(&id));
+
+        assert_eq!(runner.delay_at[(0, 0)], 1);
+        assert_eq!(runner.delay_at[(1, 0)], 1);
+        assert_eq!(runner.delay_at[(2, 0)], 1);
+        assert_eq!(runner.delay_at[(0, 1)], 1);
+        assert_eq!(runner.delay_at[(1, 1)], 1);
+        assert_eq!(runner.delay_at[(2, 1)], 1);
+        assert_eq!(runner.delay_at[(0, 2)], 0);
+        assert_eq!(runner.delay_at[(1, 2)], 0);
+        assert_eq!(runner.delay_at[(2, 2)], 0);
     }
 }

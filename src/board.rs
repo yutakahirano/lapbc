@@ -13,10 +13,16 @@ pub struct OperationId {
     id: u32,
 }
 
-#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, Eq, Hash, Ord, PartialOrd, PartialEq, Serialize)]
 pub struct Position {
     pub x: u32,
     pub y: u32,
+}
+
+impl Position {
+    pub fn new(x: u32, y: u32) -> Self {
+        Self { x, y }
+    }
 }
 
 struct Targets<'a> {
@@ -1340,13 +1346,12 @@ impl Board {
         }
 
         // The lattice surgery operation for the second-last Clifford correction.
-        let occupancy = LatticeSurgery(id);
         for &(x, y) in routing_qubits.iter().chain(distillation_qubits) {
             self.set_occupancy_range(x, y, second_last_correction_range.clone(), occupancy.clone());
         }
 
         // The Y measurement for the second-last Clifford correction.
-        self.set_occupancy_range(cx1, cy1, second_last_y_measurement_range, YMeasurement(id));
+        self.set_occupancy_range(cx1, cy1, second_last_y_measurement_range, occupancy.clone());
 
         // The lattice surgery operation for the last Clifford correction.
         for &(x, y) in routing_qubits {
@@ -1354,8 +1359,8 @@ impl Board {
         }
 
         // The Y measurement for the last Clifford correction.
-        self.set_occupancy_range(cx2, cy2, last_y_measurement_range.clone(), YMeasurement(id));
-        self.set_occupancy_range(cx3, cy3, last_y_measurement_range, YMeasurement(id));
+        self.set_occupancy_range(cx2, cy2, last_y_measurement_range.clone(), occupancy.clone());
+        self.set_occupancy_range(cx3, cy3, last_y_measurement_range, occupancy.clone());
 
         let correction_qubits = vec![
             Position { x: cx1, y: cy1 },
@@ -3066,37 +3071,26 @@ mod tests {
 
         assert!(board.is_occupancy(0, 0, 0..33, DataQubitInOperation(id)));
         assert!(board.is_occupancy(0, 0, 33..40, IdleDataQubit));
-        assert!(board.is_occupancy(1, 0, 0..27, PiOver8RotationBlock(id)));
-        assert!(board.is_occupancy(1, 0, 27..33, LatticeSurgery(id)));
-        assert!(board.is_occupancy(1, 0, 33..36, YMeasurement(id)));
+        assert!(board.is_occupancy(1, 0, 0..36, PiOver8RotationBlock(id)));
         assert!(board.is_occupancy(1, 0, 36..40, Vacant));
-        assert!(board.is_occupancy(2, 0, 0..27, PiOver8RotationBlock(id)));
-        assert!(board.is_occupancy(2, 0, 27..30, LatticeSurgery(id)));
+        assert!(board.is_occupancy(2, 0, 0..30, PiOver8RotationBlock(id)));
         assert!(board.is_occupancy(2, 0, 30..40, Vacant));
 
-        assert!(board.is_occupancy(0, 1, 0..27, PiOver8RotationBlock(id)));
-        assert!(board.is_occupancy(0, 1, 27..33, LatticeSurgery(id)));
-        assert!(board.is_occupancy(0, 1, 33..36, YMeasurement(id)));
+        assert!(board.is_occupancy(0, 1, 0..36, PiOver8RotationBlock(id)));
         assert!(board.is_occupancy(0, 1, 36..40, Vacant));
-        assert!(board.is_occupancy(1, 1, 0..27, PiOver8RotationBlock(id)));
-        assert!(board.is_occupancy(1, 1, 27..33, LatticeSurgery(id)));
+        assert!(board.is_occupancy(1, 1, 0..33, PiOver8RotationBlock(id)));
         assert!(board.is_occupancy(1, 1, 33..40, Vacant));
-        assert!(board.is_occupancy(2, 1, 0..27, PiOver8RotationBlock(id)));
-        assert!(board.is_occupancy(2, 1, 27..30, LatticeSurgery(id)));
+        assert!(board.is_occupancy(2, 1, 0..30, PiOver8RotationBlock(id)));
         assert!(board.is_occupancy(2, 1, 30..40, Vacant));
 
-        assert!(board.is_occupancy(0, 2, 0..27, PiOver8RotationBlock(id)));
-        assert!(board.is_occupancy(0, 2, 27..30, LatticeSurgery(id)));
-        assert!(board.is_occupancy(0, 2, 30..33, YMeasurement(id)));
+        assert!(board.is_occupancy(0, 2, 0..33, PiOver8RotationBlock(id)));
         assert!(board.is_occupancy(0, 2, 33..40, Vacant));
-        assert!(board.is_occupancy(1, 2, 0..27, PiOver8RotationBlock(id)));
-        assert!(board.is_occupancy(1, 2, 27..30, LatticeSurgery(id)));
+        assert!(board.is_occupancy(1, 2, 0..30, PiOver8RotationBlock(id)));
         assert!(board.is_occupancy(1, 2, 30..40, Vacant));
         assert!(board.is_occupancy(2, 2, 0..40, Vacant));
 
-        assert!(board.is_occupancy(0, 3, 0..27, PiOver8RotationBlock(id)));
-        assert!(board.is_occupancy(0, 3, 27..30, LatticeSurgery(id)));
-        assert!(board.is_occupancy(0, 3, 30..33, Vacant));
+        assert!(board.is_occupancy(0, 3, 0..30, PiOver8RotationBlock(id)));
+        assert!(board.is_occupancy(0, 3, 30..40, Vacant));
         assert!(board.is_occupancy(1, 3, 0..40, Vacant));
         assert!(board.is_occupancy(2, 3, 0..40, Vacant));
 
