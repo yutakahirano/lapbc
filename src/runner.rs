@@ -1026,6 +1026,8 @@ impl Runner {
             }
 
             self.runtime_cycle += 1;
+
+            assert!(self.runtime_cycle < 2_000_000_000);
         }
         let scheduled_end_cycle = range_2d(width, height)
             .map(|(x, y)| self.end_cycle_at[(x, y)])
