@@ -1503,8 +1503,15 @@ impl Board {
         self.cycle_after_last_operation_at[qubit.qubit] > cycle
     }
 
+    pub fn get_earliest_available_cycle_at(&self, qubit: Qubit) -> u32 {
+        if qubit.qubit >= self.cycle_after_last_operation_at.len() {
+            return 0;
+        }
+        self.cycle_after_last_operation_at[qubit.qubit]
+    }
+
     // Returns true if the qubit at (x, y) is `occupancy` at all the cycles in the range.
-    fn is_occupancy(
+    pub fn is_occupancy(
         &self,
         x: u32,
         y: u32,
