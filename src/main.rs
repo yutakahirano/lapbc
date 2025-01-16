@@ -1004,14 +1004,22 @@ fn main() {
         &ops,
         conf.single_qubit_arbitrary_angle_rotation_precision,
     );
+    let ops = lapbc::lapbc_translation(&ops);
+    let spc_ops = pbc::spc_translation(&ops);
+
     let ops = if args.use_pi_over_8_rotation_block {
-        lapbc::lapbc_translation(&ops)
+        ops
     } else {
-        let ops = lapbc::lapbc_translation(&ops);
         let ops = translate_arbitrary_angle_rotations(&ops, &angle_map, &conf);
         lapbc::lapbc_translation(&ops)
     };
     println!("num lapbc ops = {}", ops.len());
+    println!(
+        "spc_ops.len = {}, len * distance = {}, spc_cycles = {}",
+         spc_ops.len(),
+         spc_ops.len() * conf.code_distance as usize,
+         num_spc_cycles(&spc_ops, &angle_map, &conf)
+    );
 
     let num_qubits_in_registers = registers.qregs.iter().map(|(_, size)| *size).sum::<u32>();
     let qubit_ids_in_mapping = mapping
@@ -1073,21 +1081,12 @@ fn main() {
         std::fs::write(schedule_output_filename, serialized).unwrap();
     }
 
-    let spc_ops = pbc::spc_translation(&ops);
-    println!(
-        "spc_ops.len = {}, len * distance = {}, spc_cycles = {}",
-        spc_ops.len(),
-        spc_ops.len() * conf.code_distance as usize,
-        num_spc_cycles(&spc_ops, &angle_map, &conf)
-    );
-
     let n = 10;
     let mut average_delay = 0.0;
-    for _ in 0..n {
-        println!("run");
+    for i in 0..n {
         let mut runner = runner::Runner::new(&board);
         let delay = runner.run();
-        println!("runtime_cycle = {}, delay = {}", runner.runtime_cycle(), delay);
+        println!("Run [{:2}]: runtime_cycle = {}, delay = {}", i, runner.runtime_cycle(), delay);
         average_delay += (delay as f64) / n as f64;
     }
     println!("delay = {:.2}", average_delay);
