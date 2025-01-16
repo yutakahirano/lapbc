@@ -1,7 +1,8 @@
 use serde::Serialize;
+use serde::Deserialize;
 
 // One-qubit Pauli operation.
-#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum Pauli {
     I,
     X,
@@ -59,7 +60,7 @@ impl std::fmt::Display for Pauli {
 }
 
 // Axis is a multi-qubit Pauli operation and it represents the rotation axis of a Pauli rotation.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Axis {
     axis: Vec<Pauli>,
 }
@@ -161,7 +162,7 @@ impl std::fmt::Display for Axis {
 }
 
 // Angle represents the rotation angle of a Pauli rotation.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Serialize)]
 pub enum Angle {
     Zero,
     PiOver2,
@@ -171,7 +172,7 @@ pub enum Angle {
 }
 
 // PauliRotation represents a Pauli rotation consisting of a rotation axis and an angle.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct PauliRotation {
     pub axis: Axis,
     pub angle: Angle,
@@ -203,7 +204,7 @@ impl std::fmt::Display for PauliRotation {
 }
 
 // Operation represents an operation in the Pauli-based Computation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum Operation {
     PauliRotation(PauliRotation),
     Measurement(Axis),

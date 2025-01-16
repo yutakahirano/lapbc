@@ -16,6 +16,7 @@ use rand_distr::Normal;
 use std::env;
 use std::fmt::Write;
 use std::io::IsTerminal;
+use std::io::Write as _;
 
 mod board;
 mod lapbc;
@@ -37,6 +38,12 @@ struct Args {
     mapping_filename: String,
 
     #[arg(short, long)]
+    output_source_filename: Option<String>,
+
+    #[arg(short, long)]
+    file_format: Option<String>,
+
+    #[arg(short, long)]
     schedule_output_filename: Option<String>,
 
     #[arg(short, long, default_value_t = false)]
@@ -51,6 +58,7 @@ use pbc::Axis;
 use pbc::Pauli;
 use pbc::PauliRotation;
 
+#[derive(serde::Deserialize, serde::Serialize)]
 struct Registers {
     qregs: Vec<(String, u32)>,
     cregs: Vec<(String, u32)>,
@@ -456,6 +464,13 @@ fn print_line_potentially_with_colors(line: &str) {
         println!("{}", line);
     }
 }
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct OperationsAndRegisters {
+    ops: Vec<Operation>,
+    registers: Registers,
+}
+
 
 #[allow(dead_code)]
 fn extract_and_print(nodes: &[qasm::AstNode]) -> Option<(Vec<PauliRotation>, Registers)> {
@@ -918,7 +933,6 @@ fn num_spc_cycles(
 
 fn main() {
     let args = Args::parse();
-    // Load the QASM file.
     let source = std::fs::read_to_string(args.filename.clone()).unwrap();
     let mapping_source = std::fs::read_to_string(&args.mapping_filename).unwrap();
 
@@ -930,25 +944,48 @@ fn main() {
     // println!("result.any_errors = {:?}", result.any_errors());
     // result.print_errors();
 
-    let cwd = env::current_dir().unwrap();
-    let processed_source = qasm::process(&source, &cwd);
-    let mut tokens = qasm::lex(&processed_source);
-    let ast = qasm::parse(&mut tokens);
-    let ast = match ast {
-        Ok(ast) => ast,
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            return;
-        }
+    let file_format = args.file_format.unwrap_or("qasm".to_string()).to_ascii_lowercase();
+    let (ops, registers) = if file_format == "qasm" {
+        let cwd = env::current_dir().unwrap();
+        print!("Parsing the QASM file...");
+        std::io::stdout().flush().unwrap();
+        let processed_source = qasm::process(&source, &cwd);
+        let mut tokens = qasm::lex(&processed_source);
+        let ast = match qasm::parse(&mut tokens) {
+            Ok(ast) => ast,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                return;
+            }
+        };
+        println!("done.");
+        let (ops, registers) = match extract(&ast) {
+            Some((ops, registers)) => (ops, registers),
+            None => {
+                eprintln!("Error in extracting the AST");
+                return;
+            }
+        };
+        (ops, registers)
+    } else if file_format == "json" {
+        print!("Parsing the JSON file...");
+        std::io::stdout().flush().unwrap();
+        let deserialized: OperationsAndRegisters = serde_json::from_str(&source).unwrap();
+        println!("done.");
+        (deserialized.ops, deserialized.registers)
+    } else {
+        eprintln!("Error: unknown file format: {}", file_format);
+        return;
     };
 
-    let (ops, registers) = match extract(&ast) {
-        Some((ops, registers)) => (ops, registers),
-        None => {
-            eprintln!("Error in extracting the AST");
-            return;
-        }
-    };
+    if let Some(filename) = args.output_source_filename {
+        let out = OperationsAndRegisters { ops, registers };
+        let serialized = serde_json::to_string(&out).unwrap();
+        std::fs::write(filename.clone(), serialized).unwrap();
+        println!("Serialized the source to {}", filename);
+        return;
+    }
+
 
     let mapping = mapping::DataQubitMapping::new_from_json(&mapping_source).unwrap();
     let conf = Configuration {
@@ -974,6 +1011,7 @@ fn main() {
         let ops = translate_arbitrary_angle_rotations(&ops, &angle_map, &conf);
         lapbc::lapbc_translation(&ops)
     };
+    println!("num lapbc ops = {}", ops.len());
 
     let num_qubits_in_registers = registers.qregs.iter().map(|(_, size)| *size).sum::<u32>();
     let qubit_ids_in_mapping = mapping
