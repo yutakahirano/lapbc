@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::mapping::{DataQubitMapping, Qubit};
 use crate::pbc::{Angle, Operation, Pauli, PauliRotation};
 
-#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct OperationId {
     id: u32,
 }
@@ -268,6 +268,7 @@ pub struct Board {
     current_operation_id: OperationId,
     operations: Vec<OperationWithAdditionalData>,
     preferable_distillation_area_size: u32,
+    arbitrary_angle_rotation_map: Vec<(f64, Vec<Pauli>, Vec<Pauli>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -282,6 +283,10 @@ pub struct Configuration {
     pub num_distillations_for_pi_over_8_rotation: u32,
     // The probability to distill a magic state successfully.
     pub magic_state_distillation_success_rate: f64,
+
+    pub num_distillations_for_pi_over_8_rotation_block: u32,
+    pub single_qubit_8_over_pi_rotation_block_depth_ratio: f64,
+    pub single_qubit_arbitrary_angle_rotation_precision: f64,
 }
 
 pub struct Map2D<T: Clone> {
@@ -330,6 +335,7 @@ impl Board {
             current_operation_id,
             operations: vec![],
             preferable_distillation_area_size: 1,
+            arbitrary_angle_rotation_map: vec![],
         }
     }
 
@@ -397,6 +403,10 @@ impl Board {
         self.preferable_distillation_area_size = size;
     }
 
+    pub fn set_arbitrary_angle_rotation_map(&mut self, map: Vec<(f64, Vec<Pauli>, Vec<Pauli>)>) {
+        self.arbitrary_angle_rotation_map = map;
+    }
+
     fn schedule_mesuarement(&mut self, qubit: Qubit, axis: Pauli) -> bool {
         let (x, y) = self.data_qubit_mapping[&qubit];
 
@@ -429,7 +439,29 @@ impl Board {
             Angle::PiOver2 => true,
             Angle::PiOver4 => self.schedule_pi_over_4_rotation(rotation),
             Angle::PiOver8 => self.schedule_pi_over_8_rotation(rotation),
-            Angle::Arbitrary(..) => panic!("Not implemented yet"),
+            Angle::Arbitrary(angle) => {
+                let eps = self.conf.single_qubit_arbitrary_angle_rotation_precision;
+                if let Some((_, pi_over_8_rotation_axes, pi_over_4_rotation_axes)) = self
+                    .arbitrary_angle_rotation_map
+                    .iter()
+                    .find(|(a, _, _)| (*a - angle).abs() < eps)
+                {
+                    let support_size = rotation.axis.iter().filter(|a| **a != Pauli::I).count();
+                    assert_eq!(support_size, 1);
+                    let target_position =
+                        rotation.axis.iter().position(|a| *a != Pauli::I).unwrap();
+                    let target = Qubit::new(target_position);
+                    let pi_over_8_rotation_axes = pi_over_8_rotation_axes.clone();
+                    let pi_over_4_rotation_axes = pi_over_4_rotation_axes.clone();
+                    self.schedule_single_qubit_pi_over_8_rotation_block(
+                        target,
+                        &pi_over_8_rotation_axes,
+                        &pi_over_4_rotation_axes,
+                    )
+                } else {
+                    panic!("self.arbitrary_angle_rotation_map.get(&{}) is None", angle);
+                }
+            }
         }
     }
 
@@ -1092,8 +1124,8 @@ impl Board {
         qubit: Qubit,
         pi_over_8_rotation_axes: &[Pauli],
         pi_over_4_rotation_axes: &[Pauli],
-        distillation_area_size: u32,
     ) -> bool {
+        let distillation_area_size = self.conf.num_distillations_for_pi_over_8_rotation_block;
         let width = self.conf.width;
         let height = self.conf.height;
         assert!(distillation_area_size > 1);
@@ -1218,14 +1250,14 @@ impl Board {
                         push(x - 1, y);
                     }
                     if y > 0 {
-                        push(y - 1, y);
+                        push(x, y - 1);
                     }
                     push(x + 1, y);
                     push(x, y + 1);
                 });
-            for next in next_candidates {
+            for next in &next_candidates {
                 let mut new_distillation_qubits = distillation_qubits.clone();
-                new_distillation_qubits.push(next);
+                new_distillation_qubits.push(*next);
                 // Sort the qubits to check the uniqueness.
                 new_distillation_qubits.sort();
 
@@ -1273,12 +1305,13 @@ impl Board {
         let success_rate = self.conf.magic_state_distillation_success_rate;
         let expected_distillation_cost =
             distillation_cost as f64 / success_rate / num_distillation_blocks as f64;
+        let ratio = self.conf.single_qubit_8_over_pi_rotation_block_depth_ratio;
 
         let first_round_cost =
-            std::cmp::max((expected_distillation_cost * 1.5).ceil() as u32, distillation_cost)
+            std::cmp::max((expected_distillation_cost * ratio).ceil() as u32, distillation_cost)
                 + distance;
         let one_round_cost =
-            std::cmp::max((expected_distillation_cost * 1.5).ceil() as u32, distance);
+            std::cmp::max((expected_distillation_cost * ratio).ceil() as u32, distance);
 
         first_round_cost + one_round_cost * (depth - 1) + 2 * distance
     }
@@ -1334,6 +1367,12 @@ impl Board {
             return false;
         }
         if !self.is_vacant(cx2, cy2, last_correction_range.clone()) {
+            return false;
+        }
+        if !self.is_vacant(cx2, cy2, last_y_measurement_range.clone()) {
+            return false;
+        }
+        if !self.is_vacant(cx3, cy3, last_y_measurement_range.clone()) {
             return false;
         }
 
@@ -1616,14 +1655,26 @@ mod tests {
         Axis::new(v)
     }
 
+    fn default_conf() -> Configuration {
+        Configuration {
+            width: 5,
+            height: 5,
+            code_distance: 5,
+            magic_state_distillation_cost: 10,
+            num_distillations_for_pi_over_8_rotation: 1,
+            magic_state_distillation_success_rate: 0.5,
+            num_distillations_for_pi_over_8_rotation_block: 1,
+            single_qubit_8_over_pi_rotation_block_depth_ratio: 1.2,
+            single_qubit_arbitrary_angle_rotation_precision: 1e-10,
+        }
+    }
+
     fn new_board(mapping: DataQubitMapping, code_distance: u32) -> Board {
         let conf = Configuration {
             width: mapping.width,
             height: mapping.height,
             code_distance,
-            magic_state_distillation_cost: 0,
-            num_distillations_for_pi_over_8_rotation: 1,
-            magic_state_distillation_success_rate: 0.0,
+            ..default_conf()
         };
 
         Board::new(mapping, &conf)
@@ -2617,10 +2668,7 @@ mod tests {
         let conf = Configuration {
             width,
             height,
-            code_distance: 3,
-            magic_state_distillation_cost: 5,
-            num_distillations_for_pi_over_8_rotation: 1,
-            magic_state_distillation_success_rate: 0.8,
+            ..default_conf()
         };
         let mut board = Board::new(mapping, &conf);
 
@@ -2651,9 +2699,7 @@ mod tests {
             width,
             height,
             code_distance: 3,
-            magic_state_distillation_cost: 5,
-            num_distillations_for_pi_over_8_rotation: 1,
-            magic_state_distillation_success_rate: 0.8,
+            ..default_conf()
         };
         let mut board = Board::new(mapping, &conf);
         board.ensure_board_occupancy(10);
@@ -2684,9 +2730,7 @@ mod tests {
             width,
             height,
             code_distance: 3,
-            magic_state_distillation_cost: 5,
-            num_distillations_for_pi_over_8_rotation: 1,
-            magic_state_distillation_success_rate: 0.8,
+            ..default_conf()
         };
         let mut board = Board::new(mapping, &conf);
         board.ensure_board_occupancy(10);
@@ -2711,9 +2755,8 @@ mod tests {
             height,
             code_distance: 3,
             magic_state_distillation_cost: 5,
-
             num_distillations_for_pi_over_8_rotation: 1,
-            magic_state_distillation_success_rate: 0.8,
+            ..default_conf()
         };
         let mut board = Board::new(mapping, &conf);
         assert!(!board.schedule_single_qubit_pi_over_8_rotation(Qubit::new(0), Pauli::Z, 5, 2));
@@ -2793,7 +2836,7 @@ mod tests {
             code_distance: 3,
             magic_state_distillation_cost: 5,
             num_distillations_for_pi_over_8_rotation: 1,
-            magic_state_distillation_success_rate: 0.8,
+            ..default_conf()
         };
         let mut board = Board::new(mapping, &conf);
         assert!(!board.schedule_single_qubit_pi_over_8_rotation(Qubit::new(0), Pauli::X, 5, 2));
@@ -2870,7 +2913,7 @@ mod tests {
             code_distance: 3,
             magic_state_distillation_cost: 5,
             num_distillations_for_pi_over_8_rotation: 5,
-            magic_state_distillation_success_rate: 0.8,
+            ..default_conf()
         };
         let mut board = Board::new(mapping, &conf);
         board.preferable_distillation_area_size = 3;
@@ -2968,7 +3011,9 @@ mod tests {
             code_distance: 3,
             magic_state_distillation_cost: 5,
             num_distillations_for_pi_over_8_rotation: 5,
-            magic_state_distillation_success_rate: 0.8,
+            num_distillations_for_pi_over_8_rotation_block: 5,
+            single_qubit_8_over_pi_rotation_block_depth_ratio: 1.5,
+            ..default_conf()
         };
         let mut board = Board::new(mapping, &conf);
 
@@ -2977,7 +3022,6 @@ mod tests {
             Qubit::new(0),
             &[Pauli::X, Pauli::Y, Pauli::Z],
             &[Pauli::X, Pauli::Y],
-            5
         ));
         assert!(board.operations.is_empty());
     }
@@ -2994,8 +3038,9 @@ mod tests {
             height,
             code_distance: 3,
             magic_state_distillation_cost: 5,
-            num_distillations_for_pi_over_8_rotation: 5,
-            magic_state_distillation_success_rate: 0.8,
+            num_distillations_for_pi_over_8_rotation_block: 5,
+            single_qubit_8_over_pi_rotation_block_depth_ratio: 1.2,
+            ..default_conf()
         };
         let mut board = Board::new(mapping, &conf);
         let id = board.issue_operation_id();
@@ -3009,7 +3054,6 @@ mod tests {
             Qubit::new(0),
             &[Pauli::X, Pauli::Z, Pauli::X],
             &[Pauli::X, Pauli::Y],
-            5
         ));
         assert!(board.operations.is_empty());
     }
@@ -3026,8 +3070,9 @@ mod tests {
             height,
             code_distance: 3,
             magic_state_distillation_cost: 5,
-            num_distillations_for_pi_over_8_rotation: 5,
-            magic_state_distillation_success_rate: 0.8,
+            num_distillations_for_pi_over_8_rotation_block: 5,
+            single_qubit_8_over_pi_rotation_block_depth_ratio: 1.2,
+            ..default_conf()
         };
         let mut board = Board::new(mapping, &conf);
 
@@ -3035,7 +3080,6 @@ mod tests {
             Qubit::new(0),
             &[Pauli::X, Pauli::Z, Pauli::X],
             &[Pauli::X, Pauli::Y],
-            5
         ));
         assert!(board.operations.is_empty());
     }
@@ -3053,8 +3097,10 @@ mod tests {
             height,
             code_distance: 3,
             magic_state_distillation_cost: 5,
-            num_distillations_for_pi_over_8_rotation: 5,
             magic_state_distillation_success_rate: 0.2,
+            num_distillations_for_pi_over_8_rotation_block: 5,
+            single_qubit_8_over_pi_rotation_block_depth_ratio: 1.5,
+            ..default_conf()
         };
         let mut board = Board::new(mapping, &conf);
         let pi_over_8_axes = [Pauli::X, Pauli::Z, Pauli::X];
@@ -3064,7 +3110,6 @@ mod tests {
             Qubit::new(0),
             &pi_over_8_axes,
             &pi_over_4_axes,
-            5
         ));
 
         let id = OperationId { id: 0 };

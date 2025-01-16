@@ -10,6 +10,9 @@ use board::OperationWithAdditionalData;
 use clap::Parser;
 use lapbc::LapbcCompactOperation;
 use pbc::Operation;
+use rand::seq::SliceRandom;
+use rand_distr::Distribution;
+use rand_distr::Normal;
 use std::env;
 use std::fmt::Write;
 use std::io::IsTerminal;
@@ -19,6 +22,9 @@ mod lapbc;
 mod mapping;
 mod pbc;
 mod runner;
+
+#[cfg(test)]
+mod testutils;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -32,6 +38,9 @@ struct Args {
 
     #[arg(short, long)]
     schedule_output_filename: Option<String>,
+
+    #[arg(short, long, default_value_t = false)]
+    print_operations: bool,
 }
 
 use pbc::Angle;
@@ -203,7 +212,6 @@ fn translate_gate(
     registers: &Registers,
     output: &mut Vec<pbc::Operation>,
 ) -> Result<(), String> {
-    println!("angle_args = {:?}", angle_args);
     use pbc::Operation::Measurement as M;
     use pbc::Operation::PauliRotation as R;
     let num_qubits = registers.num_qubits();
@@ -639,6 +647,59 @@ fn extract_and_print(nodes: &[qasm::AstNode]) -> Option<(Vec<PauliRotation>, Reg
     None
 }
 
+fn generate_random_pauli_axes_for_arbitrary_angle_rotations(
+    ops: &[Operation],
+    precision: f64,
+) -> Vec<(f64, Vec<Pauli>, Vec<Pauli>)> {
+    use Pauli::*;
+    let mut angle_map = Vec::<(f64, Vec<Pauli>, Vec<Pauli>)>::new();
+    for op in ops {
+        let angle = match op {
+            Operation::PauliRotation(PauliRotation {
+                angle: Angle::Arbitrary(angle),
+                ..
+            }) => angle,
+            _ => {
+                continue;
+            }
+        };
+        if angle_map
+            .iter()
+            .any(|(a, _, _)| (angle - a).abs() < precision)
+        {
+            continue;
+        }
+        let mean = -1.55 * precision.log2() + 3.0;
+        assert!(mean > 0.0);
+        let stddev = mean / 4.0;
+        let distribution = Normal::<f64>::new(mean, stddev).unwrap();
+        // Let `pi_over_8_rotation_axes` be a sequence of random Paulis.
+        let mut rng = rand::thread_rng();
+        let len = distribution.sample(&mut rng).round() as usize;
+        let mut pi_over_8_rotation_axes = vec![];
+        while pi_over_8_rotation_axes.len() < len {
+            let axis = *([X, Y, Z].choose(&mut rng).unwrap());
+            if let Some(last) = pi_over_8_rotation_axes.last() {
+                if *last == axis {
+                    continue;
+                }
+            }
+            pi_over_8_rotation_axes.push(axis);
+        }
+        let mut pi_over_4_rotation_axes = vec![];
+        let first = *[I, X, Y, Z].choose(&mut rng).unwrap();
+        if first != I {
+            pi_over_4_rotation_axes.push(first);
+        }
+        let second = *[I, X, Y, Z].choose(&mut rng).unwrap();
+        if second != I && second != first {
+            pi_over_4_rotation_axes.push(second);
+        }
+        angle_map.push((*angle, pi_over_8_rotation_axes, pi_over_4_rotation_axes));
+    }
+    angle_map
+}
+
 fn main() {
     let args = Args::parse();
     // Load the QASM file.
@@ -711,17 +772,56 @@ fn main() {
         magic_state_distillation_cost: 21,
         magic_state_distillation_success_rate: 0.5,
         num_distillations_for_pi_over_8_rotation: 6,
+        num_distillations_for_pi_over_8_rotation_block: 3,
+        single_qubit_8_over_pi_rotation_block_depth_ratio: 1.2,
+        single_qubit_arbitrary_angle_rotation_precision: 1e-10,
     };
+
+    let mut angle_map = Vec::<(f64, Vec<Pauli>, Vec<Pauli>)>::new();
+    for op in &ops {
+        let angle = match op {
+            Operation::PauliRotation(PauliRotation {
+                axis: _,
+                angle: Angle::Arbitrary(angle),
+            }) => angle,
+            _ => {
+                continue;
+            }
+        };
+        let eps = conf.single_qubit_arbitrary_angle_rotation_precision;
+        if angle_map.iter().any(|(a, _, _)| (angle - a).abs() < eps) {
+            continue;
+        }
+
+        let mut rng = rand::thread_rng();
+
+        let distribution = Normal::<f64>::new(20.0, 5.0).unwrap();
+        let len = distribution.sample(&mut rng).round() as usize;
+        let pi_over_4_rotation_axes = vec![];
+        // Let `pi_over_8_rotation_axes` be a sequence of random Paulis.
+        let mut pi_over_8_rotation_axes = vec![];
+        while pi_over_8_rotation_axes.len() < len {
+            let axis = *([Pauli::X, Pauli::Y, Pauli::Z].choose(&mut rng).unwrap());
+            if let Some(last) = pi_over_8_rotation_axes.last() {
+                if *last == axis {
+                    continue;
+                }
+            }
+            pi_over_8_rotation_axes.push(axis);
+        }
+        angle_map.push((*angle, pi_over_8_rotation_axes, pi_over_4_rotation_axes));
+    }
 
     let mut board = board::Board::new(mapping, &conf);
     board.set_preferable_distillation_area_size(5);
+    let map = generate_random_pauli_axes_for_arbitrary_angle_rotations(&ops, 1e-10);
+    board.set_arbitrary_angle_rotation_map(map);
     let mut schedule: Vec<(usize, Operation, u32)> = Vec::new();
 
     for (layer_index, (start, end)) in layers.iter().enumerate() {
-        println!();
         let mut scheduled = vec![false; end - start];
-
-        board.set_cycle(std::cmp::max(board.cycle(), 200) - 200);
+        let lookahead = 8000;
+        board.set_cycle(std::cmp::max(board.cycle(), lookahead) - lookahead);
 
         let mut indices = (0..end - start).collect::<Vec<_>>();
         if layer_index + 1 < layers.len() {
@@ -741,7 +841,6 @@ fn main() {
                 ci.cmp(&cj)
             });
         }
-        println!("indices = {:?} (+{})", indices, start);
         let indices = indices;
 
         while scheduled.iter().any(|&b| !b) {
@@ -755,8 +854,11 @@ fn main() {
                 let op = &ops[start + i];
                 if board.schedule(op) {
                     let cycle = board.cycle();
-                    let line = format!("Schedule ops[{:3}] ({}) at cycle {}", start + i, op, cycle);
-                    print_line_potentially_with_colors(&line);
+                    if args.print_operations {
+                        let line =
+                            format!("Schedule ops[{:3}] ({}) at cycle {}", start + i, op, cycle);
+                        print_line_potentially_with_colors(&line);
+                    }
                     scheduled[i] = true;
                     scheduled_on_this_cycle = true;
                     schedule.push((start + i, op.clone(), cycle));
@@ -781,22 +883,6 @@ fn main() {
     }
 
     println!("num cycles = {}", board.get_last_end_cycle());
-
-    let spc_ops = pbc::spc_translation(&ops);
-    println!(
-        "spc_ops.len = {}, cycles = {}",
-        spc_ops.len(),
-        spc_ops.len() * conf.code_distance as usize
-    );
-
-    let n = 50;
-    let mut average_delay = 0.0;
-    for _ in 0..n {
-        let mut runner = runner::Runner::new(&board);
-        let delay = runner.run();
-        average_delay += (delay as f64) / n as f64;
-    }
-    println!("delay = {:.2}", average_delay);
 
     if let Some(schedule_output_filename) = args.schedule_output_filename {
         #[derive(serde::Serialize)]
@@ -839,6 +925,24 @@ fn main() {
         let serialized = serde_json::to_string(&schedule).unwrap();
         std::fs::write(schedule_output_filename, serialized).unwrap();
     }
+
+    let spc_ops = pbc::spc_translation(&ops);
+    println!(
+        "spc_ops.len = {}, cycles = {}",
+        spc_ops.len(),
+        spc_ops.len() * conf.code_distance as usize
+    );
+
+    let n = 10;
+    let mut average_delay = 0.0;
+    for _ in 0..n {
+        println!("run");
+        let mut runner = runner::Runner::new(&board);
+        let delay = runner.run();
+        println!("runtime_cycle = {}, delay = {}", runner.runtime_cycle(), delay);
+        average_delay += (delay as f64) / n as f64;
+    }
+    println!("delay = {:.2}", average_delay);
 }
 
 // tests

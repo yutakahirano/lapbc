@@ -53,7 +53,10 @@ impl Index<(u32, u32, u32)> for OccupancyMap {
     type Output = BoardOccupancy;
 
     fn index(&self, (x, y, cycle): (u32, u32, u32)) -> &Self::Output {
-        &self.map[(cycle * self.width * self.height + y * self.width + x) as usize]
+        assert!(x < self.width);
+        assert!(y < self.height);
+        let index = (cycle * self.width * self.height + y * self.width + x) as usize;
+        &self.map[index]
     }
 }
 
@@ -284,9 +287,9 @@ impl Runner {
 
         let mut positions_in_states = states.iter().map(|s| s.position).collect::<Vec<_>>();
         positions_in_states.sort();
-        let mut sorted_distillation_qubit = distillation_qubits.to_vec();
-        sorted_distillation_qubit.sort();
-        assert_eq!(sorted_distillation_qubit, positions_in_states);
+        let mut sorted_distillation_qubits = distillation_qubits.to_vec();
+        sorted_distillation_qubits.sort();
+        assert_eq!(sorted_distillation_qubits, positions_in_states);
 
         states
     }
@@ -588,7 +591,6 @@ impl Runner {
                             continue;
                         }
                         *steps += 1;
-                        #[allow(clippy::collapsible_if)]
                         if *steps >= self.conf.magic_state_distillation_cost {
                             let success_rate = self.conf.magic_state_distillation_success_rate;
                             if rng.gen_range(0.0..1.0) <= success_rate {
@@ -612,7 +614,7 @@ impl Runner {
                         let cycle_on_schedule = self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
                         let occupancy = &self.schedule[(pos.x, pos.y, cycle_on_schedule)];
                         assert!(
-                            matches!(occupancy, LatticeSurgery(id) | DataQubitInOperation(id) if *id == op.id())
+                            matches!(occupancy, LatticeSurgery(id) | DataQubitInOperation(id) | MagicStateDistillation(id) if *id == op.id())
                         );
                     }
                     *steps += 1;
@@ -799,56 +801,41 @@ impl Runner {
         use BoardOccupancy::*;
         for (id, state) in &mut self.pi_over_8_rotation_block_states {
             let op = &self.operations[id];
-            let (target, routing_qubits, distillation_qubits, correction_qubits) = match op {
-                OperationWithAdditionalData::SingleQubitPiOver8RotationBlock {
-                    target,
-                    routing_qubits,
-                    distillation_qubits,
-                    correction_qubits,
-                    ..
-                } => (target, routing_qubits, distillation_qubits, correction_qubits),
-                _ => unreachable!(),
-            };
+            let (target, routing_qubits, distillation_qubits, correction_qubits, pi_over_8_axes) =
+                match op {
+                    OperationWithAdditionalData::SingleQubitPiOver8RotationBlock {
+                        target,
+                        routing_qubits,
+                        distillation_qubits,
+                        correction_qubits,
+                        pi_over_8_axes,
+                        ..
+                    } => (
+                        target,
+                        routing_qubits,
+                        distillation_qubits,
+                        correction_qubits,
+                        pi_over_8_axes,
+                    ),
+                    _ => unreachable!(),
+                };
             let is_associated_with_this_op = |occupancy: BoardOccupancy| {
                 matches!(occupancy, PiOver8RotationBlock(id) if id == op.id())
                     || matches!(occupancy, DataQubitInOperation(id) if id == op.id())
             };
-            // If the previous occupancy is suitable and the current occupancy is not suitable,
-            // we should add a delay to make the current occupancy suitable.
-            let should_add_delay = |pos: &Position| -> bool {
-                let cycle_on_schedule = self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
-                let prev = if cycle_on_schedule > 0 {
-                    Some(self.schedule[(pos.x, pos.y, cycle_on_schedule - 1)].clone())
-                } else {
-                    None
-                };
-                let current = if cycle_on_schedule < self.end_cycle_at[(pos.x, pos.y)] {
-                    Some(self.schedule[(pos.x, pos.y, cycle_on_schedule)].clone())
-                } else {
-                    None
-                };
-                prev.map_or(false, is_associated_with_this_op)
-                    && !current.map_or(false, is_associated_with_this_op)
-            };
 
+            let next_active_qubits: Vec<Position>;
             match state {
                 SingleQubitPiOver8RotationBlockState::PiOver8Rotation {
-                    index: _,
+                    index,
                     lattice_surgery_steps,
                     distillation_steps,
                 } => {
-                    // We construct a new Vec to avoid Rust borrow checker complaints.
-                    let positions = std::iter::once(target)
-                        .chain(routing_qubits.iter())
-                        .chain(distillation_qubits.iter())
-                        .cloned()
-                        .filter(should_add_delay)
-                        .collect::<Vec<_>>();
-                    for pos in positions {
-                        self.delay_at[(pos.x, pos.y)] += 1;
-                    }
                     let is_available = |pos: &Position| {
                         let cycle_on_schedule = self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
+                        if cycle_on_schedule >= self.end_cycle_at[(pos.x, pos.y)] {
+                            return false;
+                        }
                         let occupancy = &self.schedule[(pos.x, pos.y, cycle_on_schedule)];
                         is_associated_with_this_op(occupancy.clone())
                     };
@@ -883,10 +870,28 @@ impl Runner {
                     for site in distillation_steps.iter_mut() {
                         let pos = site.position;
                         let cycle_on_schedule = self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
-                        let occupancy = &self.schedule[(pos.x, pos.y, cycle_on_schedule)];
-                        if matches!(occupancy, PiOver8RotationBlock(id) if *id == op.id()) {
-                            site.run_distillation(rng, &self.conf);
+                        if cycle_on_schedule < self.end_cycle_at[(pos.x, pos.y)] {
+                            let occupancy = &self.schedule[(pos.x, pos.y, cycle_on_schedule)];
+                            if matches!(occupancy, PiOver8RotationBlock(id) if *id == op.id()) {
+                                site.run_distillation(rng, &self.conf);
+                            }
                         }
+                    }
+
+                    if *index == pi_over_8_axes.len() as u32 - 1
+                        && lattice_surgery_steps == &Some(self.conf.code_distance)
+                    {
+                        next_active_qubits = std::iter::once(target)
+                            .chain(routing_qubits)
+                            .chain(std::iter::once(&correction_qubits[0]))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                    } else {
+                        next_active_qubits = std::iter::once(target)
+                            .chain(routing_qubits.iter())
+                            .chain(distillation_qubits.iter())
+                            .cloned()
+                            .collect::<Vec<_>>();
                     }
                 }
                 SingleQubitPiOver8RotationBlockState::Correction { steps } => {
@@ -894,8 +899,9 @@ impl Runner {
                     let y_measurement_cost = y_measurement_cost(distance);
                     assert!(y_measurement_cost <= distance);
                     assert_eq!(correction_qubits.len(), 3);
+                    *steps += 1;
 
-                    let active_qubits = if *steps < distance + y_measurement_cost {
+                    next_active_qubits = if *steps < distance + y_measurement_cost {
                         std::iter::once(target)
                             .chain(routing_qubits)
                             .chain(std::iter::once(&correction_qubits[0]))
@@ -906,38 +912,62 @@ impl Runner {
                             .chain(routing_qubits)
                             .cloned()
                             .collect::<Vec<_>>()
-                    } else {
+                    } else if *steps < 2 * distance + y_measurement_cost {
                         correction_qubits
                             .iter()
                             .skip(1)
                             .cloned()
                             .collect::<Vec<_>>()
+                    } else {
+                        vec![]
                     };
+                }
+            }
 
-                    let inactive_qubits = std::iter::once(target)
-                        .chain(routing_qubits)
-                        .chain(distillation_qubits)
-                        .cloned()
-                        .filter(|pos| !active_qubits.contains(pos))
-                        .collect::<Vec<_>>();
+            let qubits = std::iter::once(target)
+                .chain(routing_qubits)
+                .chain(distillation_qubits)
+                .cloned()
+                .collect::<Vec<_>>();
 
-                    let positions = active_qubits
-                        .iter()
-                        .filter(|p| should_add_delay(p))
-                        .collect::<Vec<_>>();
-                    for pos in positions {
+            for pos in qubits {
+                if next_active_qubits.contains(&pos) {
+                    let cycle_on_schedule = self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
+                    let end_cycle = self.end_cycle_at[(pos.x, pos.y)];
+                    let current = if cycle_on_schedule < end_cycle {
+                        Some(self.schedule[(pos.x, pos.y, cycle_on_schedule)].clone())
+                    } else {
+                        None
+                    };
+                    let next = if cycle_on_schedule + 1 < end_cycle {
+                        Some(self.schedule[(pos.x, pos.y, cycle_on_schedule + 1)].clone())
+                    } else {
+                        None
+                    };
+                    // If the current occupancy is suitable and the next occupancy is not suitable, then
+                    // we should add a delay for the next (runtime) cycle.
+                    let should_add_delay = current.map_or(false, is_associated_with_this_op)
+                        && !next.map_or(false, is_associated_with_this_op);
+
+                    if should_add_delay {
                         self.delay_at[(pos.x, pos.y)] += 1;
                     }
-
-                    for pos in inactive_qubits {
-                        let cycle_on_schedule = self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
-                        let o = self.schedule[(pos.x, pos.y, cycle_on_schedule)].clone();
-                        if is_associated_with_this_op(o) && self.delay_at[(pos.x, pos.y)] > 0 {
-                            self.delay_at[(pos.x, pos.y)] -= 1;
+                } else {
+                    loop {
+                        let cycle_on_schedule =
+                            self.runtime_cycle + 1 - self.delay_at[(pos.x, pos.y)];
+                        if cycle_on_schedule >= self.end_cycle_at[(pos.x, pos.y)] {
+                            break;
                         }
+                        let occupancy = self.schedule[(pos.x, pos.y, cycle_on_schedule)].clone();
+                        if !is_associated_with_this_op(occupancy) {
+                            break;
+                        }
+                        if self.delay_at[(pos.x, pos.y)] == 0 {
+                            break;
+                        }
+                        self.delay_at[(pos.x, pos.y)] -= 1;
                     }
-
-                    *steps += 1;
                 }
             }
         }
@@ -994,6 +1024,7 @@ impl Runner {
             }) {
                 break;
             }
+
             self.runtime_cycle += 1;
         }
         let scheduled_end_cycle = range_2d(width, height)
@@ -1005,67 +1036,24 @@ impl Runner {
 
     pub fn run(&mut self) -> u32 {
         let mut rng = thread_rng();
+
         self.run_internal(&mut rng)
+    }
+
+    pub fn runtime_cycle(&self) -> u32 {
+        self.runtime_cycle
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutils::RngForTesting;
     use crate::{
         mapping::{DataQubitMapping, Qubit},
         pbc::Pauli,
     };
     use std::ops::Range;
-
-    struct RngForTesting {
-        data: Vec<u64>,
-        counter: u64,
-    }
-
-    impl rand::RngCore for RngForTesting {
-        fn next_u32(&mut self) -> u32 {
-            self.next_u64() as u32
-        }
-
-        fn next_u64(&mut self) -> u64 {
-            let ret = self.data[self.counter as usize % self.data.len()];
-            self.counter += 1;
-            ret
-        }
-
-        fn fill_bytes(&mut self, _dest: &mut [u8]) {
-            unimplemented!()
-        }
-
-        fn try_fill_bytes(&mut self, _dest: &mut [u8]) -> Result<(), rand::Error> {
-            unimplemented!()
-        }
-    }
-
-    impl RngForTesting {
-        fn new(data: &[u64]) -> Self {
-            RngForTesting {
-                data: data.to_vec(),
-                counter: 0,
-            }
-        }
-
-        fn new_with_zero() -> Self {
-            RngForTesting {
-                data: vec![0],
-                counter: 0,
-            }
-        }
-
-        // The program would crash when `next_64` or `next_u32` is called for the returned generator.
-        fn new_unusable() -> Self {
-            RngForTesting {
-                data: vec![],
-                counter: 0,
-            }
-        }
-    }
 
     fn new_runner(
         operations: Vec<OperationWithAdditionalData>,
@@ -1141,19 +1129,25 @@ mod tests {
         Position { x, y }
     }
 
-    #[test]
-    fn test_empty() {
-        let end_cycle = 30_u32;
-        let mut rng = RngForTesting::new_unusable();
-        let conf = Configuration {
+    fn default_conf() -> Configuration {
+        Configuration {
             width: 3,
             height: 4,
             code_distance: 5,
             magic_state_distillation_cost: 13,
             num_distillations_for_pi_over_8_rotation: 5,
             magic_state_distillation_success_rate: 0.5,
-        };
+            num_distillations_for_pi_over_8_rotation_block: 3,
+            single_qubit_8_over_pi_rotation_block_depth_ratio: 1.2,
+            single_qubit_arbitrary_angle_rotation_precision: 1e-10,
+        }
+    }
 
+    #[test]
+    fn test_empty() {
+        let end_cycle = 30_u32;
+        let mut rng = RngForTesting::new_unusable();
+        let conf = default_conf();
         let mut mapping = DataQubitMapping::new(conf.width, conf.height);
         let q0 = Qubit::new(0);
         let q1 = Qubit::new(1);
@@ -1181,9 +1175,7 @@ mod tests {
             width: 3,
             height: 4,
             code_distance: 5,
-            magic_state_distillation_cost: 13,
-            num_distillations_for_pi_over_8_rotation: 5,
-            magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
         };
 
         let mut mapping = DataQubitMapping::new(conf.width, conf.height);
@@ -1224,8 +1216,8 @@ mod tests {
             height: 4,
             code_distance: 5,
             magic_state_distillation_cost: 13,
-            num_distillations_for_pi_over_8_rotation: 5,
             magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
         };
 
         let mut mapping = DataQubitMapping::new(conf.width, conf.height);
@@ -1276,8 +1268,8 @@ mod tests {
             height: 4,
             code_distance: 5,
             magic_state_distillation_cost: 13,
-            num_distillations_for_pi_over_8_rotation: 5,
             magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
         };
 
         let mut mapping = DataQubitMapping::new(conf.width, conf.height);
@@ -1323,8 +1315,8 @@ mod tests {
             height: 4,
             code_distance: 5,
             magic_state_distillation_cost: 13,
-            num_distillations_for_pi_over_8_rotation: 5,
             magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
         };
 
         let mut mapping = DataQubitMapping::new(conf.width, conf.height);
@@ -1384,8 +1376,8 @@ mod tests {
             height: 4,
             code_distance: 5,
             magic_state_distillation_cost: 13,
-            num_distillations_for_pi_over_8_rotation: 5,
             magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
         };
 
         let mut mapping = DataQubitMapping::new(conf.width, conf.height);
@@ -1454,8 +1446,8 @@ mod tests {
             height: 4,
             code_distance: 5,
             magic_state_distillation_cost: 13,
-            num_distillations_for_pi_over_8_rotation: 5,
             magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
         };
 
         let mut mapping = DataQubitMapping::new(conf.width, conf.height);
@@ -1540,8 +1532,8 @@ mod tests {
             height: 4,
             code_distance: 5,
             magic_state_distillation_cost: 13,
-            num_distillations_for_pi_over_8_rotation: 5,
             magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
         };
 
         let mut mapping = DataQubitMapping::new(conf.width, conf.height);
@@ -1609,8 +1601,8 @@ mod tests {
             height: 4,
             code_distance: 5,
             magic_state_distillation_cost: 13,
-            num_distillations_for_pi_over_8_rotation: 5,
             magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
         };
 
         let mut mapping = DataQubitMapping::new(conf.width, conf.height);
@@ -1675,8 +1667,8 @@ mod tests {
             height: 4,
             code_distance: 5,
             magic_state_distillation_cost: 13,
-            num_distillations_for_pi_over_8_rotation: 5,
             magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
         };
 
         let mut mapping = DataQubitMapping::new(conf.width, conf.height);
@@ -1744,8 +1736,8 @@ mod tests {
             height: 4,
             code_distance: 5,
             magic_state_distillation_cost: 13,
-            num_distillations_for_pi_over_8_rotation: 5,
             magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
         };
 
         let mut mapping = DataQubitMapping::new(conf.width, conf.height);
@@ -1819,8 +1811,8 @@ mod tests {
             height: 4,
             code_distance: 5,
             magic_state_distillation_cost: 13,
-            num_distillations_for_pi_over_8_rotation: 5,
             magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
         };
         let routing_qubits = vec![
             Position::new(1, 0),
@@ -1865,8 +1857,8 @@ mod tests {
             height: 4,
             code_distance: 5,
             magic_state_distillation_cost: 13,
-            num_distillations_for_pi_over_8_rotation: 5,
             magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
         };
         let routing_qubits = vec![
             Position::new(1, 0),
@@ -1948,8 +1940,8 @@ mod tests {
             height: 4,
             code_distance: 5,
             magic_state_distillation_cost: 13,
-            num_distillations_for_pi_over_8_rotation: 5,
             magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
         };
         let routing_qubits = vec![
             Position::new(1, 0),
@@ -2024,8 +2016,8 @@ mod tests {
             height: 4,
             code_distance: 5,
             magic_state_distillation_cost: 13,
-            num_distillations_for_pi_over_8_rotation: 5,
             magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
         };
         let routing_qubits = vec![
             Position::new(1, 0),
@@ -2108,8 +2100,8 @@ mod tests {
             height: 4,
             code_distance: 5,
             magic_state_distillation_cost: 13,
-            num_distillations_for_pi_over_8_rotation: 5,
             magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
         };
         let routing_qubits = vec![Position::new(1, 0), Position::new(2, 0)];
         let mut distillation_steps = vec![
@@ -2214,8 +2206,8 @@ mod tests {
             height: 4,
             code_distance: 5,
             magic_state_distillation_cost: 13,
-            num_distillations_for_pi_over_8_rotation: 5,
             magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
         };
 
         let mut mapping = DataQubitMapping::new(conf.width, conf.height);
@@ -2311,8 +2303,8 @@ mod tests {
             height: 4,
             code_distance: 3,
             magic_state_distillation_cost: 3,
-            num_distillations_for_pi_over_8_rotation: 2,
             magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
         };
 
         let mut mapping = DataQubitMapping::new(conf.width, conf.height);
@@ -2435,8 +2427,8 @@ mod tests {
             height: 4,
             code_distance: 3,
             magic_state_distillation_cost: 3,
-            num_distillations_for_pi_over_8_rotation: 2,
             magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
         };
 
         let mut mapping = DataQubitMapping::new(conf.width, conf.height);
@@ -2678,8 +2670,8 @@ mod tests {
             height: 3,
             code_distance: 3,
             magic_state_distillation_cost: 2,
-            num_distillations_for_pi_over_8_rotation: 2,
             magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
         };
 
         let mut mapping = DataQubitMapping::new(conf.width, conf.height);
@@ -2897,8 +2889,8 @@ mod tests {
             height: 3,
             code_distance: 3,
             magic_state_distillation_cost: 2,
-            num_distillations_for_pi_over_8_rotation: 2,
             magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
         };
 
         let mut mapping = DataQubitMapping::new(conf.width, conf.height);
@@ -3115,8 +3107,8 @@ mod tests {
             height: 3,
             code_distance: 3,
             magic_state_distillation_cost: 2,
-            num_distillations_for_pi_over_8_rotation: 2,
             magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
         };
 
         let mut mapping = DataQubitMapping::new(conf.width, conf.height);
@@ -3331,8 +3323,8 @@ mod tests {
             height: 4,
             code_distance: 3,
             magic_state_distillation_cost: 2,
-            num_distillations_for_pi_over_8_rotation: 2,
             magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
         };
 
         let mut mapping = DataQubitMapping::new(conf.width, conf.height);
@@ -3590,6 +3582,7 @@ mod tests {
             runner.run_internal_step(&mut rng, true);
             let state = runner.pi_over_8_rotation_block_states.get(&id).unwrap();
             assert_eq!(state, e);
+
             runner.runtime_cycle += 1;
         }
 
@@ -3607,5 +3600,125 @@ mod tests {
         assert_eq!(runner.delay_at[(0, 2)], 0);
         assert_eq!(runner.delay_at[(1, 2)], 0);
         assert_eq!(runner.delay_at[(2, 2)], 0);
+    }
+
+    #[test]
+    fn test_process_pi_over_8_block_without_suppressing_delay_reduction() {
+        use BoardOccupancy::*;
+        use OperationWithAdditionalData::*;
+        let end_cycle = 30_u32;
+        let conf = Configuration {
+            width: 3,
+            height: 4,
+            code_distance: 5,
+            magic_state_distillation_cost: 3,
+            magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
+        };
+
+        let mut mapping = DataQubitMapping::new(conf.width, conf.height);
+        let q0 = Qubit::new(0);
+        mapping.map(q0, 0, 0);
+        let id1 = OperationId::new(1);
+        let id2 = OperationId::new(2);
+        let id3 = OperationId::new(3);
+        let mut rng = RngForTesting::new(&[u64::MAX, u64::MAX, 0, u64::MAX]);
+
+        let operations = vec![
+            SingleQubitPiOver8RotationBlock {
+                id: id1,
+                target: Position::new(0, 0),
+                routing_qubits: vec![
+                    Position::new(1, 0),
+                    Position::new(0, 1),
+                    Position::new(1, 1),
+                ],
+                distillation_qubits: vec![Position::new(2, 0), Position::new(2, 1)],
+                correction_qubits: vec![
+                    Position::new(2, 0),
+                    Position::new(1, 0),
+                    Position::new(0, 1),
+                ],
+                pi_over_8_axes: vec![Pauli::Z, Pauli::Y],
+                pi_over_4_axes: vec![],
+            },
+            SingleQubitPiOver8RotationBlock {
+                id: id2,
+                target: Position::new(0, 0),
+                routing_qubits: vec![
+                    Position::new(1, 0),
+                    Position::new(0, 1),
+                    Position::new(1, 1),
+                ],
+                distillation_qubits: vec![Position::new(0, 2), Position::new(1, 2)],
+                correction_qubits: vec![
+                    Position::new(0, 2),
+                    Position::new(1, 0),
+                    Position::new(0, 1),
+                ],
+                pi_over_8_axes: vec![Pauli::Z, Pauli::Y],
+                pi_over_4_axes: vec![],
+            },
+            SingleQubitPiOver8RotationBlock {
+                id: id3,
+                target: Position::new(0, 0),
+                routing_qubits: vec![
+                    Position::new(1, 0),
+                    Position::new(0, 1),
+                    Position::new(1, 1),
+                ],
+                distillation_qubits: vec![Position::new(0, 2), Position::new(0, 3)],
+                correction_qubits: vec![
+                    Position::new(0, 2),
+                    Position::new(1, 0),
+                    Position::new(0, 1),
+                ],
+                pi_over_8_axes: vec![Pauli::Z, Pauli::Y],
+                pi_over_4_axes: vec![],
+            },
+        ];
+        let qubit_positions = [mapping.get(q0).unwrap()];
+        let mut schedule = new_occupancy_map(conf.width, conf.height, end_cycle, &qubit_positions);
+
+        set_occupancy(&mut schedule, 0, 0, 0..9, DataQubitInOperation(id1));
+        set_occupancy(&mut schedule, 1, 0, 0..9, PiOver8RotationBlock(id1));
+        set_occupancy(&mut schedule, 0, 1, 0..9, PiOver8RotationBlock(id1));
+        set_occupancy(&mut schedule, 1, 1, 0..9, PiOver8RotationBlock(id1));
+        set_occupancy(&mut schedule, 2, 0, 0..9, PiOver8RotationBlock(id1));
+        set_occupancy(&mut schedule, 2, 1, 0..9, PiOver8RotationBlock(id1));
+
+        set_occupancy(&mut schedule, 0, 0, 10..19, DataQubitInOperation(id2));
+        set_occupancy(&mut schedule, 1, 0, 10..19, PiOver8RotationBlock(id2));
+        set_occupancy(&mut schedule, 0, 1, 10..19, PiOver8RotationBlock(id2));
+        set_occupancy(&mut schedule, 1, 1, 10..19, PiOver8RotationBlock(id2));
+        set_occupancy(&mut schedule, 0, 2, 10..19, PiOver8RotationBlock(id2));
+        set_occupancy(&mut schedule, 1, 2, 10..19, PiOver8RotationBlock(id2));
+
+        set_occupancy(&mut schedule, 0, 0, 20..30, DataQubitInOperation(id3));
+        set_occupancy(&mut schedule, 1, 0, 20..30, PiOver8RotationBlock(id3));
+        set_occupancy(&mut schedule, 0, 1, 20..30, PiOver8RotationBlock(id3));
+        set_occupancy(&mut schedule, 1, 1, 20..30, PiOver8RotationBlock(id3));
+        set_occupancy(&mut schedule, 0, 2, 20..30, PiOver8RotationBlock(id3));
+        set_occupancy(&mut schedule, 0, 3, 20..30, PiOver8RotationBlock(id3));
+
+        let mut runner = new_runner(operations, schedule, &conf);
+
+        while runner.removed_operation_ids.len() < 3 {
+            runner.run_internal_step(&mut rng, false);
+            runner.runtime_cycle += 1;
+        }
+
+        assert_eq!(runner.delay_at[(0, 0)], 57);
+        assert_eq!(runner.delay_at[(1, 0)], 61);
+        assert_eq!(runner.delay_at[(2, 0)], 26);
+        assert_eq!(runner.delay_at[(0, 1)], 61);
+        assert_eq!(runner.delay_at[(1, 1)], 57);
+        assert_eq!(runner.delay_at[(2, 1)], 17);
+        assert_eq!(runner.delay_at[(0, 2)], 56);
+        assert_eq!(runner.delay_at[(1, 2)], 31);
+        assert_eq!(runner.delay_at[(2, 2)], 0);
+        assert_eq!(runner.delay_at[(0, 3)], 47);
+        assert_eq!(runner.delay_at[(1, 3)], 0);
+        assert_eq!(runner.delay_at[(2, 3)], 0);
     }
 }
