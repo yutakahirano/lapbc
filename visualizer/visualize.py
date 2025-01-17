@@ -131,8 +131,25 @@ class MagicStateDistillation:
         return MagicStateDistillation.class_id()
 
 
+class PiOver8RotationBlock:
+    def __init__(self, id: int):
+        self.id = id
+
+    def __str__(self) -> str:
+        format = 'PiOver8RotationBlock(id={})'
+        return format.format(self.id)
+
+    @staticmethod
+    def class_id() -> int:
+        return 8
+
+    def type_id(self) -> int:
+        return PiOver8RotationBlock.class_id()
+
+
 Occupancy = Vacant | LatticeSurgery | IdleDataQubit | DataQubitInOperation | \
-            YInitialization | YMeasurement | MagicStateDistillation
+            YInitialization | YMeasurement | MagicStateDistillation | \
+            PiOver8RotationBlock
 
 
 class PiOver4Rotation:
@@ -173,7 +190,7 @@ class ScheduleEntry:
 
 
 class Schedule:
-    def __init__(self, width: int, height: int, operations: dict[int,Operation], schedule: list[list[ScheduleEntry]]):
+    def __init__(self, width: int, height: int, operations: dict[int, Operation], schedule: list[list[ScheduleEntry]]):
         self.width = width
         self.height = height
         self.operations = operations
@@ -249,14 +266,14 @@ def load_schedule(path: str) -> Schedule:
                 x = int(json_target['x'])
                 assert 'y' in json_target
                 y = int(json_target['y'])
-                assert 'pi_over_8_rotation_axes' in json_operation
-                json_pi_over_8_rotation_axes = json_operation['pi_over_8_rotation_axes']
+                assert 'pi_over_8_axes' in json_operation
+                json_pi_over_8_rotation_axes = json_operation['pi_over_8_axes']
                 pi_over_8_rotation_axes: list[Pauli] = []
                 assert isinstance(json_pi_over_8_rotation_axes, list)
                 for json_axis in json_pi_over_8_rotation_axes:
                     pi_over_8_rotation_axes.append(Pauli.from_string(json_axis))
-                assert 'pi_over_4_rotation_axes' in json_operation
-                json_pi_over_4_rotation_axes = json_operation['pi_over_4_rotation_axes']
+                assert 'pi_over_4_axes' in json_operation
+                json_pi_over_4_rotation_axes = json_operation['pi_over_4_axes']
                 pi_over_4_rotation_axes: list[Pauli] = []
                 assert isinstance(json_pi_over_4_rotation_axes, list)
                 for json_axis in json_pi_over_4_rotation_axes:
@@ -292,6 +309,8 @@ def load_schedule(path: str) -> Schedule:
                     occupancy = YMeasurement(int(operation_id))
                 case {'type': 'MAGIC_STATE_DISTILLATION', 'operation_id': operation_id}:
                     occupancy = MagicStateDistillation(int(operation_id))
+                case {'type': 'PI_OVER_8_ROTATION_BLOCK', 'operation_id': operation_id}:
+                    occupancy = PiOver8RotationBlock(int(operation_id))
             entry = ScheduleEntry(x, y, occupancy)
             entries_at_cycle.append(entry)
 
@@ -309,6 +328,7 @@ def create_normalizer_and_color_map() -> tuple[matplotlib.colors.Normalize, matp
         YInitialization.class_id(),
         YMeasurement.class_id(),
         MagicStateDistillation.class_id(),
+        PiOver8RotationBlock.class_id(),
     ]
     assert 0 not in type_ids
     vmin = min(type_ids)
@@ -326,6 +346,7 @@ def create_normalizer_and_color_map() -> tuple[matplotlib.colors.Normalize, matp
         (norm_dict[YInitialization.class_id()], (0xcc, 0x6f, 0x68)),
         (norm_dict[YMeasurement.class_id()], (0xcc, 0x6f, 0x68)),
         (norm_dict[MagicStateDistillation.class_id()], (0x2f, 0x57, 0xc3)),
+        (norm_dict[PiOver8RotationBlock.class_id()], (0xff, 0x99, 0x00)),
     ]
     clist.sort()
     for i in range(len(clist)):
@@ -369,7 +390,7 @@ def visualize(schedule: Schedule, path_pattern: str, cycle_range: Iterable[int] 
             y = entry.y
             if isinstance(occupancy, LatticeSurgery) or isinstance(occupancy, DataQubitInOperation) or \
                isinstance(occupancy, MagicStateDistillation) or isinstance(occupancy, YInitialization) or \
-               isinstance(occupancy, YMeasurement):
+               isinstance(occupancy, YMeasurement) or isinstance(occupancy, PiOver8RotationBlock):
                 operation_id = occupancy.id
                 text_operation_id = '{:02x}'.format(operation_id & 0xff)
                 ax.text(y, x, text_operation_id, ha='center', va='center')
@@ -404,7 +425,7 @@ def generate_animation(schedule: Schedule, path: str, cycle_range: Iterable[int]
             y = entry.y
             if isinstance(occupancy, LatticeSurgery) or isinstance(occupancy, DataQubitInOperation) or \
                isinstance(occupancy, MagicStateDistillation) or isinstance(occupancy, YInitialization) or \
-               isinstance(occupancy, YMeasurement):
+               isinstance(occupancy, YMeasurement) or isinstance(occupancy, PiOver8RotationBlock):
                 operation_id = occupancy.id
                 text_operation_id = '{:02x}'.format(operation_id & 0xff)
                 ax.text(y, x, text_operation_id, ha='center', va='center')
