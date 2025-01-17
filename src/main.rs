@@ -17,6 +17,9 @@ use std::env;
 use std::fmt::Write;
 use std::io::IsTerminal;
 use std::io::Write as _;
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 mod board;
 mod lapbc;
@@ -51,6 +54,36 @@ struct Args {
 
     #[arg(short, long, default_value_t = false)]
     use_pi_over_8_rotation_block: bool,
+
+    #[arg(short, long, default_value_t = 15_u32)]
+    code_distance: u32,
+
+    #[arg(short, long, default_value_t = 21_u32)]
+    magic_state_distillation_cost: u32,
+
+    #[arg(short, long, default_value_t = 0.5)]
+    magic_state_distillation_success_probability: f64,
+
+    #[arg(short, long, default_value_t = 6)]
+    num_distillations_for_pi_over_8_rotation: u32,
+
+    #[arg(short, long, default_value_t = 3)]
+    num_distillations_for_pi_over_8_rotation_block: u32,
+
+    #[arg(short, long, default_value_t = 1.1)]
+    single_qubit_pi_over_8_rotation_block_depth_ratio: f64,
+
+    #[arg(short, long, default_value_t = 1e-10)]
+    single_qubit_arbitrary_angle_rotation_precision: f64,
+
+    #[arg(short, long, default_value_t = 5)]
+    preferable_distillation_area_size: u32,
+
+    #[arg(short, long, default_value_t = 10)]
+    num_executions: u32,
+
+    #[arg(short, long, default_value_t = 1)]
+    parallelism: u32,
 }
 
 use pbc::Angle;
@@ -471,7 +504,6 @@ struct OperationsAndRegisters {
     registers: Registers,
 }
 
-
 #[allow(dead_code)]
 fn extract_and_print(nodes: &[qasm::AstNode]) -> Option<(Vec<PauliRotation>, Registers)> {
     use qasm::AstNode;
@@ -803,8 +835,6 @@ fn schedule(board: &mut board::Board, ops: &[Operation], print_operations: bool)
         layers.push((start, end));
         start = end;
     }
-    println!("num layers = {}", layers.len());
-
     let mut schedule: Vec<(usize, Operation, u32)> = Vec::new();
 
     for (layer_index, (start, end)) in layers.iter().enumerate() {
@@ -875,7 +905,6 @@ fn schedule(board: &mut board::Board, ops: &[Operation], print_operations: bool)
             }
         }
     }
-    println!("scheduling is done.");
     // These are commented out because they are too slow.
     // Check the validity of the schedule.
     // schedule.sort_by_key(|&(index, _, _)| index);
@@ -931,6 +960,159 @@ fn num_spc_cycles(
     cycles
 }
 
+fn output_schedule(board: &board::Board, filename: &str) -> Result<(), std::io::Error> {
+    #[derive(serde::Serialize)]
+    struct ScheduleEntry {
+        x: u32,
+        y: u32,
+        occupancy: BoardOccupancy,
+    }
+
+    #[derive(serde::Serialize)]
+    struct Schedule {
+        operations: Vec<OperationWithAdditionalData>,
+        schedule: Vec<Vec<ScheduleEntry>>,
+        width: u32,
+        height: u32,
+    }
+
+    let end_cycle = board.get_last_end_cycle();
+    let width = board.width();
+    let height = board.height();
+    let schedule = (0..end_cycle)
+        .map(|cycle| {
+            let mut schedule_on_this_cycle = vec![];
+            for y in 0..height {
+                for x in 0..width {
+                    let occupancy = board.get_occupancy(x, y, cycle);
+                    schedule_on_this_cycle.push(ScheduleEntry { x, y, occupancy });
+                }
+            }
+            schedule_on_this_cycle
+        })
+        .collect::<Vec<_>>();
+
+    let schedule = Schedule {
+        operations: board.operations().to_vec(),
+        schedule,
+        width,
+        height,
+    };
+    let serialized = serde_json::to_string(&schedule)?;
+    std::fs::write(filename, serialized)?;
+
+    Ok(())
+}
+
+fn run(
+    board_without_blocks: board::Board,
+    board_with_blocks: Option<board::Board>,
+    num_executions: u32,
+    parallelism: u32,
+) {
+    if num_executions == 0 {
+        return;
+    }
+
+    let runner_for_board_without_blocks = runner::Runner::new(&board_without_blocks);
+    let runner_for_board_with_blocks = board_with_blocks.map(|b| runner::Runner::new(&b));
+    let num_total_executions = if runner_for_board_with_blocks.is_some() {
+        num_executions * 2
+    } else {
+        num_executions
+    };
+
+    #[derive(Debug)]
+    enum Id {
+        WithoutBlocks,
+        WithBlocks,
+    }
+    enum Command {
+        Run(Box<runner::Runner>, Id),
+        Stop,
+    }
+
+    let (sender_for_command, receiver_for_command) = mpsc::channel::<Command>();
+    let (sender_for_reply, receiver_for_reply) = mpsc::channel::<(Id, u32, u32)>();
+    let receiver_for_command = Arc::new(Mutex::new(receiver_for_command));
+    let sender_for_reply = Arc::new(Mutex::new(sender_for_reply));
+    let mut join_handles = (0..parallelism)
+        .map(|_| {
+            let receiver = Arc::clone(&receiver_for_command);
+            let sender = Arc::clone(&sender_for_reply);
+            std::thread::spawn(move || {
+                loop {
+                    let command = receiver.lock().unwrap().recv().unwrap();
+                    match command {
+                        Command::Run(mut runner, id) => {
+                            let delay = runner.run();
+                            let runtime_cycle = runner.runtime_cycle();
+                            println!("Run ({:?}): runtime cycle = {}, delay = {}", id, runtime_cycle, delay);
+                            sender.lock().unwrap().send((id, runtime_cycle, delay)).unwrap();
+                        }
+                        Command::Stop => break,
+                    }
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for _ in 0..num_executions {
+        let runner = Box::new(runner_for_board_without_blocks.clone());
+        sender_for_command
+            .send(Command::Run(runner, Id::WithoutBlocks))
+            .unwrap();
+    }
+
+    if let Some(runner) = runner_for_board_with_blocks {
+        for _ in 0..num_executions {
+            let runner = Box::new(runner.clone());
+            sender_for_command
+                .send(Command::Run(runner, Id::WithBlocks))
+                .unwrap();
+        }
+    }
+
+    for _ in 0..parallelism {
+        sender_for_command.send(Command::Stop).unwrap();
+    }
+    while let Some(handle) = join_handles.pop() {
+        handle.join().unwrap();
+    }
+
+    let mut results_without_blocks = Vec::new();
+    let mut results_with_blocks = Vec::new();
+
+    for (id, cycle, delay) in receiver_for_reply.iter().take(num_total_executions as usize) {
+        match id {
+            Id::WithoutBlocks => {
+                results_without_blocks.push((cycle, delay));
+            }
+            Id::WithBlocks => {
+                results_with_blocks.push((cycle, delay));
+            }
+        }
+    }
+
+    assert!(!results_without_blocks.is_empty());
+    let average_runtime_cycles = results_without_blocks.iter().map(|(c, _)| c).sum::<u32>() as f64
+        / results_without_blocks.len() as f64;
+    let average_delay = results_without_blocks.iter().map(|(_, d)| d).sum::<u32>() as f64
+        / results_without_blocks.len() as f64;
+    println!("Average runtime cycles[without blocks] = {}", average_runtime_cycles);
+    println!("Average delay[without blocks] = {}", average_delay);
+
+    if !results_with_blocks.is_empty() {
+        let averaget_runtime_cycles = results_with_blocks.iter().map(|(c, _)| c).sum::<u32>()
+            as f64
+            / results_with_blocks.len() as f64;
+        let average_delay = results_with_blocks.iter().map(|(_, d)| d).sum::<u32>() as f64
+            / results_with_blocks.len() as f64;
+        println!("Average runtime cycles[with blocks] = {}", averaget_runtime_cycles);
+        println!("Average delay[with blocks] = {}", average_delay);
+    }
+}
+
 fn main() {
     let args = Args::parse();
     let source = std::fs::read_to_string(args.filename.clone()).unwrap();
@@ -944,7 +1126,57 @@ fn main() {
     // println!("result.any_errors = {:?}", result.any_errors());
     // result.print_errors();
 
-    let file_format = args.file_format.unwrap_or("qasm".to_string()).to_ascii_lowercase();
+    println!("Args:");
+    println!("  filename = {}", args.filename);
+    println!("  mapping filename = {}", args.mapping_filename);
+    println!("  output source filename = {:?}", args.output_source_filename);
+    println!("  file format = {:?}", args.file_format);
+    println!("  schedule output filename = {:?}", args.schedule_output_filename);
+    println!("  print_operations = {}", args.print_operations);
+    println!("  use_pi_over_8_rotation_block = {}", args.use_pi_over_8_rotation_block);
+    println!("  code_distance = {}", args.code_distance);
+    println!("  magic_state_distillation_cost = {}", args.magic_state_distillation_cost);
+    println!(
+        "  magic_state_distillation_success_probability = {}",
+        args.magic_state_distillation_success_probability
+    );
+    println!(
+        "  num_distillations_for_pi_over_8_rotation = {}",
+        args.num_distillations_for_pi_over_8_rotation
+    );
+    println!(
+        "  num_distillations_for_pi_over_8_rotation_block = {}",
+        args.num_distillations_for_pi_over_8_rotation_block
+    );
+    println!(
+        "  single_qubit_pi_over_8_rotation_block_depth_ratio = {}",
+        args.single_qubit_pi_over_8_rotation_block_depth_ratio
+    );
+    println!(
+        "  single_qubit_arbitrary_angle_rotation_precision = {:e}",
+        args.single_qubit_arbitrary_angle_rotation_precision
+    );
+    println!(
+        "  preferable_distillation_area_size = {}",
+        args.preferable_distillation_area_size
+    );
+    println!("  parallelism = {}", args.parallelism);
+    println!("  num_executions = {}", args.num_executions);
+    println!();
+
+    if args.parallelism == 0 {
+        eprintln!("Error: parallelism must be a positive integer.");
+        return;
+    }
+    if args.use_pi_over_8_rotation_block && args.parallelism == 1 {
+        eprintln!("Error: parallelism must be greater than 1 when --use-pi-over-8-rotation-block is specified.");
+        return;
+    }
+
+    let file_format = args
+        .file_format
+        .unwrap_or("qasm".to_string())
+        .to_ascii_lowercase();
     let (ops, registers) = if file_format == "qasm" {
         let cwd = env::current_dir().unwrap();
         print!("Parsing the QASM file...");
@@ -986,39 +1218,40 @@ fn main() {
         return;
     }
 
-
     let mapping = mapping::DataQubitMapping::new_from_json(&mapping_source).unwrap();
     let conf = Configuration {
         width: mapping.width,
         height: mapping.height,
-        code_distance: 15,
-        magic_state_distillation_cost: 21,
-        magic_state_distillation_success_rate: 0.5,
-        num_distillations_for_pi_over_8_rotation: 6,
-        num_distillations_for_pi_over_8_rotation_block: 3,
-        single_qubit_8_over_pi_rotation_block_depth_ratio: 1.2,
-        single_qubit_arbitrary_angle_rotation_precision: 1e-10,
+        code_distance: args.code_distance,
+        magic_state_distillation_cost: args.magic_state_distillation_cost,
+        magic_state_distillation_success_rate: args.magic_state_distillation_success_probability,
+        num_distillations_for_pi_over_8_rotation: args.num_distillations_for_pi_over_8_rotation,
+        num_distillations_for_pi_over_8_rotation_block: args
+            .num_distillations_for_pi_over_8_rotation_block,
+        single_qubit_pi_over_8_rotation_block_depth_ratio: args
+            .single_qubit_pi_over_8_rotation_block_depth_ratio,
+        single_qubit_arbitrary_angle_rotation_precision: args
+            .single_qubit_arbitrary_angle_rotation_precision,
+        preferable_distillation_area_size: args.preferable_distillation_area_size,
     };
 
     let angle_map = generate_random_pauli_axes_for_arbitrary_angle_rotations(
         &ops,
         conf.single_qubit_arbitrary_angle_rotation_precision,
     );
-    let ops = lapbc::lapbc_translation(&ops);
-    let spc_ops = pbc::spc_translation(&ops);
+    let ops_with_arbitrary_angle_rotations = lapbc::lapbc_translation(&ops);
+    let spc_ops = pbc::spc_translation(&ops_with_arbitrary_angle_rotations);
+    let ops_without_arbitrary_angle_rotations =
+        translate_arbitrary_angle_rotations(&ops_with_arbitrary_angle_rotations, &angle_map, &conf);
+    let ops_without_arbitrary_angle_rotations =
+        lapbc::lapbc_translation(&ops_without_arbitrary_angle_rotations);
 
-    let ops = if args.use_pi_over_8_rotation_block {
-        ops
-    } else {
-        let ops = translate_arbitrary_angle_rotations(&ops, &angle_map, &conf);
-        lapbc::lapbc_translation(&ops)
-    };
-    println!("num lapbc ops = {}", ops.len());
+    println!("num lapbc ops = {}", ops_with_arbitrary_angle_rotations.len());
     println!(
-        "spc_ops.len = {}, len * distance = {}, spc_cycles = {}",
-         spc_ops.len(),
-         spc_ops.len() * conf.code_distance as usize,
-         num_spc_cycles(&spc_ops, &angle_map, &conf)
+        "spc_ops.len = {}, len * distance = {}, spc cycles = {}",
+        spc_ops.len(),
+        spc_ops.len() * conf.code_distance as usize,
+        num_spc_cycles(&spc_ops, &angle_map, &conf)
     );
 
     let num_qubits_in_registers = registers.qregs.iter().map(|(_, size)| *size).sum::<u32>();
@@ -1032,64 +1265,64 @@ fn main() {
         return;
     }
 
-    let mut board = board::Board::new(mapping, &conf);
-    board.set_preferable_distillation_area_size(5);
-    board.set_arbitrary_angle_rotation_map(angle_map.clone());
+    let mut board_without_blocks = board::Board::new(mapping.clone(), &conf);
+    let receiver_and_join_handle = if args.use_pi_over_8_rotation_block {
+        assert!(args.parallelism > 1);
+        let (sender, receiver) = mpsc::channel();
+        let sender = Arc::new(Mutex::new(sender));
+        let angle_map = angle_map.clone();
+        let conf = conf.clone();
+        let ops_with_arbitrary_angle_rotations = ops_with_arbitrary_angle_rotations.clone();
+        let print_operations = args.print_operations;
+        let handle = std::thread::spawn(move || {
+            let mut board_with_blocks = board::Board::new(mapping.clone(), &conf);
+            board_with_blocks.set_arbitrary_angle_rotation_map(angle_map.clone());
+            schedule(&mut board_with_blocks, &ops_with_arbitrary_angle_rotations, print_operations);
+            sender.lock().unwrap().send(board_with_blocks).unwrap();
+        });
+        Some((receiver, handle))
+    } else {
+        None
+    };
+    schedule(
+        &mut board_without_blocks,
+        &ops_without_arbitrary_angle_rotations,
+        args.print_operations,
+    );
+    println!("num cycles (without blocks) = {}", board_without_blocks.get_last_end_cycle());
 
-    schedule(&mut board, &ops, args.print_operations);
-    println!("num cycles = {}", board.get_last_end_cycle());
+    let board_with_blocks = if args.use_pi_over_8_rotation_block {
+        if let Some((receiver, handle)) = receiver_and_join_handle {
+            let board_with_blocks = receiver.recv().unwrap();
+            handle.join().unwrap();
+            println!("num cycles (with blocks) = {}", board_with_blocks.get_last_end_cycle());
+            Some(board_with_blocks)
+        } else {
+            unreachable!();
+        }
+    } else {
+        None
+    };
+
+    println!("Scheduling is done.");
 
     if let Some(schedule_output_filename) = args.schedule_output_filename {
-        #[derive(serde::Serialize)]
-        struct ScheduleEntry {
-            x: u32,
-            y: u32,
-            occupancy: BoardOccupancy,
-        }
-
-        #[derive(serde::Serialize)]
-        struct Schedule {
-            operations: Vec<OperationWithAdditionalData>,
-            schedule: Vec<Vec<ScheduleEntry>>,
-            width: u32,
-            height: u32,
-        }
-
-        let end_cycle = board.get_last_end_cycle();
-        let width = board.width();
-        let height = board.height();
-        let schedule = (0..end_cycle)
-            .map(|cycle| {
-                let mut schedule_on_this_cycle = vec![];
-                for y in 0..height {
-                    for x in 0..width {
-                        let occupancy = board.get_occupancy(x, y, cycle);
-                        schedule_on_this_cycle.push(ScheduleEntry { x, y, occupancy });
-                    }
-                }
-                schedule_on_this_cycle
-            })
-            .collect::<Vec<_>>();
-
-        let schedule = Schedule {
-            operations: board.operations().to_vec(),
-            schedule,
-            width,
-            height,
+        let board = if let Some(board_with_blocks) = &board_with_blocks {
+            println!("Outputting the schedule with blocks to {}", schedule_output_filename);
+            board_with_blocks
+        } else {
+            println!("Outputting the schedule without blocks to {}", schedule_output_filename);
+            &board_without_blocks
         };
-        let serialized = serde_json::to_string(&schedule).unwrap();
-        std::fs::write(schedule_output_filename, serialized).unwrap();
+        output_schedule(board, schedule_output_filename.as_str()).unwrap();
     }
 
-    let n = 10;
-    let mut average_delay = 0.0;
-    for i in 0..n {
-        let mut runner = runner::Runner::new(&board);
-        let delay = runner.run();
-        println!("Run [{:2}]: runtime_cycle = {}, delay = {}", i, runner.runtime_cycle(), delay);
-        average_delay += (delay as f64) / n as f64;
-    }
-    println!("delay = {:.2}", average_delay);
+    run(
+        board_without_blocks,
+        board_with_blocks,
+        args.num_executions,
+        args.parallelism,
+    );
 }
 
 // tests
@@ -1128,8 +1361,9 @@ mod tests {
             num_distillations_for_pi_over_8_rotation: 1,
             magic_state_distillation_success_rate: 0.5,
             num_distillations_for_pi_over_8_rotation_block: 1,
-            single_qubit_8_over_pi_rotation_block_depth_ratio: 1.2,
+            single_qubit_pi_over_8_rotation_block_depth_ratio: 1.2,
             single_qubit_arbitrary_angle_rotation_precision: 1e-10,
+            preferable_distillation_area_size: 5,
         }
     }
 

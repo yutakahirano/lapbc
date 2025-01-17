@@ -43,6 +43,7 @@ impl Iterator for Range2D {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct OccupancyMap {
     width: u32,
     height: u32,
@@ -100,7 +101,7 @@ enum PatchDirection {
     VerticalZBoundary,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum PiOver8RotationState {
     Distillation {
         steps: Vec<(Position, u32)>,
@@ -114,7 +115,7 @@ enum PiOver8RotationState {
     },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum PiOver4RotationState {
     Initial,
     LatticeSurgery { steps: u32 },
@@ -172,7 +173,7 @@ impl DistillationState {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum SingleQubitPiOver8RotationBlockState {
     PiOver8Rotation {
         // Represents the pi/8 rotation being performed.
@@ -186,6 +187,7 @@ enum SingleQubitPiOver8RotationBlockState {
     },
 }
 
+#[derive(Clone, Debug)]
 pub struct Runner {
     operations: HashMap<OperationId, OperationWithAdditionalData>,
     schedule: OccupancyMap,
@@ -1140,8 +1142,9 @@ mod tests {
             num_distillations_for_pi_over_8_rotation: 5,
             magic_state_distillation_success_rate: 0.5,
             num_distillations_for_pi_over_8_rotation_block: 3,
-            single_qubit_8_over_pi_rotation_block_depth_ratio: 1.2,
+            single_qubit_pi_over_8_rotation_block_depth_ratio: 1.2,
             single_qubit_arbitrary_angle_rotation_precision: 1e-10,
+            preferable_distillation_area_size: 5,
         }
     }
 

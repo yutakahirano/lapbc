@@ -3,7 +3,7 @@ pub struct Qubit {
     pub qubit: usize,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DataQubitMapping {
     pub width: u32,
     pub height: u32,

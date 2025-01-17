@@ -8,12 +8,12 @@ use serde::Serialize;
 use crate::mapping::{DataQubitMapping, Qubit};
 use crate::pbc::{Angle, Operation, Pauli, PauliRotation};
 
-#[derive(Debug, Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct OperationId {
     id: u32,
 }
 
-#[derive(Debug, Clone, Copy, Eq, Hash, Ord, PartialOrd, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialOrd, PartialEq, Serialize)]
 pub struct Position {
     pub x: u32,
     pub y: u32,
@@ -62,7 +62,7 @@ impl serde::Serialize for Targets<'_> {
     }
 }
 
-#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum OperationWithAdditionalData {
     PiOver4Rotation {
         id: OperationId,
@@ -175,7 +175,7 @@ impl serde::Serialize for OperationWithAdditionalData {
     }
 }
 
-#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum BoardOccupancy {
     Vacant,
     LatticeSurgery(OperationId),
@@ -267,11 +267,10 @@ pub struct Board {
     cycle: u32,
     current_operation_id: OperationId,
     operations: Vec<OperationWithAdditionalData>,
-    preferable_distillation_area_size: u32,
     arbitrary_angle_rotation_map: Vec<(f64, Vec<Pauli>, Vec<Pauli>)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct Configuration {
     pub width: u32,
     pub height: u32,
@@ -285,10 +284,12 @@ pub struct Configuration {
     pub magic_state_distillation_success_rate: f64,
 
     pub num_distillations_for_pi_over_8_rotation_block: u32,
-    pub single_qubit_8_over_pi_rotation_block_depth_ratio: f64,
+    pub single_qubit_pi_over_8_rotation_block_depth_ratio: f64,
     pub single_qubit_arbitrary_angle_rotation_precision: f64,
+    pub preferable_distillation_area_size: u32,
 }
 
+#[derive(Clone, Debug)]
 pub struct Map2D<T: Clone> {
     width: u32,
     height: u32,
@@ -334,7 +335,6 @@ impl Board {
             cycle: 0,
             current_operation_id,
             operations: vec![],
-            preferable_distillation_area_size: 1,
             arbitrary_angle_rotation_map: vec![],
         }
     }
@@ -397,10 +397,6 @@ impl Board {
 
     pub fn cycle(&self) -> u32 {
         self.cycle
-    }
-
-    pub fn set_preferable_distillation_area_size(&mut self, size: u32) {
-        self.preferable_distillation_area_size = size;
     }
 
     pub fn set_arbitrary_angle_rotation_map(&mut self, map: Vec<(f64, Vec<Pauli>, Vec<Pauli>)>) {
@@ -855,7 +851,7 @@ impl Board {
                 target,
                 rotation.axis[target_position],
                 self.conf.num_distillations_for_pi_over_8_rotation,
-                self.preferable_distillation_area_size,
+                self.conf.preferable_distillation_area_size,
             )
         } else {
             unimplemented!("schedule_pi_over_8_rotation: support size > 1");
@@ -1305,7 +1301,7 @@ impl Board {
         let success_rate = self.conf.magic_state_distillation_success_rate;
         let expected_distillation_cost =
             distillation_cost as f64 / success_rate / num_distillation_blocks as f64;
-        let ratio = self.conf.single_qubit_8_over_pi_rotation_block_depth_ratio;
+        let ratio = self.conf.single_qubit_pi_over_8_rotation_block_depth_ratio;
 
         let first_round_cost =
             std::cmp::max((expected_distillation_cost * ratio).ceil() as u32, distillation_cost)
@@ -1671,8 +1667,9 @@ mod tests {
             num_distillations_for_pi_over_8_rotation: 1,
             magic_state_distillation_success_rate: 0.5,
             num_distillations_for_pi_over_8_rotation_block: 1,
-            single_qubit_8_over_pi_rotation_block_depth_ratio: 1.2,
+            single_qubit_pi_over_8_rotation_block_depth_ratio: 1.2,
             single_qubit_arbitrary_angle_rotation_precision: 1e-10,
+            preferable_distillation_area_size: 5,
         }
     }
 
@@ -2920,10 +2917,10 @@ mod tests {
             code_distance: 3,
             magic_state_distillation_cost: 5,
             num_distillations_for_pi_over_8_rotation: 5,
+            preferable_distillation_area_size: 3,
             ..default_conf()
         };
         let mut board = Board::new(mapping, &conf);
-        board.preferable_distillation_area_size = 3;
         assert!(!board.schedule_rotation(&PauliRotation {
             angle: Angle::PiOver8,
             axis: new_axis("YI")
@@ -3019,7 +3016,7 @@ mod tests {
             magic_state_distillation_cost: 5,
             num_distillations_for_pi_over_8_rotation: 5,
             num_distillations_for_pi_over_8_rotation_block: 5,
-            single_qubit_8_over_pi_rotation_block_depth_ratio: 1.5,
+            single_qubit_pi_over_8_rotation_block_depth_ratio: 1.5,
             ..default_conf()
         };
         let mut board = Board::new(mapping, &conf);
@@ -3046,7 +3043,7 @@ mod tests {
             code_distance: 3,
             magic_state_distillation_cost: 5,
             num_distillations_for_pi_over_8_rotation_block: 5,
-            single_qubit_8_over_pi_rotation_block_depth_ratio: 1.2,
+            single_qubit_pi_over_8_rotation_block_depth_ratio: 1.2,
             ..default_conf()
         };
         let mut board = Board::new(mapping, &conf);
@@ -3078,7 +3075,7 @@ mod tests {
             code_distance: 3,
             magic_state_distillation_cost: 5,
             num_distillations_for_pi_over_8_rotation_block: 5,
-            single_qubit_8_over_pi_rotation_block_depth_ratio: 1.2,
+            single_qubit_pi_over_8_rotation_block_depth_ratio: 1.2,
             ..default_conf()
         };
         let mut board = Board::new(mapping, &conf);
@@ -3106,7 +3103,7 @@ mod tests {
             magic_state_distillation_cost: 5,
             magic_state_distillation_success_rate: 0.2,
             num_distillations_for_pi_over_8_rotation_block: 5,
-            single_qubit_8_over_pi_rotation_block_depth_ratio: 1.5,
+            single_qubit_pi_over_8_rotation_block_depth_ratio: 1.5,
             ..default_conf()
         };
         let mut board = Board::new(mapping, &conf);
