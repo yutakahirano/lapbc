@@ -883,6 +883,10 @@ impl Board {
         }
     }
 
+    fn l1_distance((x1, y1): (u32, u32), (x2, y2): (u32, u32)) -> u32 {
+        x1.abs_diff(x2) + y1.abs_diff(y2)
+    }
+
     fn schedule_single_qubit_pi_over_8_rotation(
         &mut self,
         qubit: Qubit,
@@ -964,6 +968,11 @@ impl Board {
                 continue;
             }
             visited.insert(sorted_history);
+
+            let limit = self.conf.num_distillations_for_pi_over_8_rotation;
+            if Self::l1_distance(history[0], history[history.len() - 1]) > limit {
+                continue;
+            }
 
             let (x, y) = history[history.len() - 1];
             if !self.is_vacant(x, y, cycle..cycle + distance) {
@@ -1079,8 +1088,12 @@ impl Board {
         for &(x, y) in distillation_area {
             let occupancy = BoardOccupancy::MagicStateDistillation(id);
             let mut c = cycle;
+            let limit = self.conf.num_distillations_for_pi_over_8_rotation;
             while c >= distillation_cost && self.is_vacant(x, y, c - distillation_cost..c) {
                 c -= distillation_cost;
+                if (cycle - c) > distillation_cost * limit {
+                    break;
+                }
             }
             let distillation_start = c;
             self.set_occupancy_range(x, y, distillation_start..cycle, occupancy);
