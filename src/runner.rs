@@ -200,6 +200,9 @@ pub struct Runner {
     pi_over_8_rotation_states: HashMap<OperationId, PiOver8RotationState>,
     pi_over_8_rotation_block_states: HashMap<OperationId, SingleQubitPiOver8RotationBlockState>,
     removed_operation_ids: HashSet<OperationId>,
+
+    // This is for checking / debugging.
+    end_cycle_for_pi_over_8_rotation_block: HashMap<OperationId, u32>,
 }
 
 impl Runner {
@@ -221,7 +224,8 @@ impl Runner {
             .iter()
             .map(|op| (op.id(), op.clone()))
             .collect::<HashMap<_, _>>();
-        Runner {
+
+        let mut runner = Runner {
             operations,
             schedule,
             conf: board.configuration().clone(),
@@ -232,7 +236,109 @@ impl Runner {
             pi_over_8_rotation_states: HashMap::new(),
             pi_over_8_rotation_block_states: HashMap::new(),
             removed_operation_ids: HashSet::new(),
+            end_cycle_for_pi_over_8_rotation_block: HashMap::new(),
+        };
+
+        // Set this to true when you are debugging.
+        let with_checking_end_cycle_for_pi_over_8_rotation_blocks = false;
+        if with_checking_end_cycle_for_pi_over_8_rotation_blocks {
+            runner.end_cycle_for_pi_over_8_rotation_block =
+                runner.construct_end_cycle_for_pi_over_8_rotation_block();
         }
+
+        runner
+    }
+
+    fn construct_end_cycle_for_pi_over_8_rotation_block(&self) -> HashMap<OperationId, u32> {
+        let width = self.conf.width;
+        let height = self.conf.height;
+        let mut end_cycle_for_pi_over_8_rotation_block = HashMap::<OperationId, u32>::new();
+        for (_id, op) in &self.operations {
+            use OperationWithAdditionalData::SingleQubitPiOver8RotationBlock;
+            let (target, routing_qubits, distillation_qubits, correction_qubits) =
+                if let SingleQubitPiOver8RotationBlock {
+                    target,
+                    routing_qubits,
+                    distillation_qubits,
+                    correction_qubits,
+                    ..
+                } = op
+                {
+                    (target, routing_qubits, distillation_qubits, correction_qubits)
+                } else {
+                    continue;
+                };
+            assert_eq!(correction_qubits.len(), 3);
+            assert_eq!(routing_qubits.len(), 3);
+            assert!(distillation_qubits.contains(&correction_qubits[0]));
+            assert!(routing_qubits.contains(&correction_qubits[1]));
+            assert!(routing_qubits.contains(&correction_qubits[2]));
+
+            let cq0 = correction_qubits[0];
+            let cq1 = correction_qubits[1];
+            let cq2 = correction_qubits[2];
+            let range = 0..self.end_cycle_at[(cq1.x, cq1.y)];
+            let end_cycle = range
+                .rev()
+                .find(|&cycle| self.schedule[(cq1.x, cq1.y, cycle)].operation_id() == Some(op.id()))
+                .unwrap()
+                + 1;
+            let distance = self.conf.code_distance;
+            let y_measurement_cost = y_measurement_cost(distance);
+            assert!(end_cycle > 2 * distance + y_measurement_cost);
+            for cycle in end_cycle - y_measurement_cost..end_cycle {
+                for (x, y) in range_2d(width, height) {
+                    let occupancy = &self.schedule[(x, y, cycle)];
+                    if (x, y) == (cq1.x, cq1.y) || (x, y) == (cq2.x, cq2.y) {
+                        // The last Y measurement is performed at one of these correction qubits.
+                        assert_eq!(*occupancy, BoardOccupancy::PiOver8RotationBlock(op.id()));
+                    } else {
+                        assert_ne!(*occupancy, BoardOccupancy::PiOver8RotationBlock(op.id()));
+                        assert_ne!(*occupancy, BoardOccupancy::DataQubitInOperation(op.id()));
+                    }
+                }
+            }
+            for cycle in end_cycle - y_measurement_cost - distance..end_cycle - y_measurement_cost {
+                for (x, y) in range_2d(width, height) {
+                    let occupancy = &self.schedule[(x, y, cycle)];
+                    if (x, y) == (cq0.x, cq0.y) {
+                        // The second-last Y measurement is performed at this correction qubit.
+                        if cycle - (end_cycle - y_measurement_cost - distance) < y_measurement_cost
+                        {
+                            assert_eq!(*occupancy, BoardOccupancy::PiOver8RotationBlock(op.id()));
+                        } else {
+                            assert_ne!(*occupancy, BoardOccupancy::PiOver8RotationBlock(op.id()));
+                        }
+                    } else if (x, y) == (target.x, target.y) {
+                        assert_eq!(*occupancy, BoardOccupancy::DataQubitInOperation(op.id()));
+                    } else if routing_qubits.contains(&Position::new(x, y)) {
+                        assert_eq!(*occupancy, BoardOccupancy::PiOver8RotationBlock(op.id()));
+                    } else {
+                        assert_ne!(*occupancy, BoardOccupancy::PiOver8RotationBlock(op.id()));
+                        assert_ne!(*occupancy, BoardOccupancy::DataQubitInOperation(op.id()));
+                    }
+                }
+            }
+            for cycle in end_cycle - y_measurement_cost - 2 * distance
+                ..end_cycle - y_measurement_cost - distance
+            {
+                for (x, y) in range_2d(width, height) {
+                    let occupancy = &self.schedule[(x, y, cycle)];
+                    if (x, y) == (target.x, target.y) {
+                        assert_eq!(*occupancy, BoardOccupancy::DataQubitInOperation(op.id()));
+                    } else if routing_qubits.contains(&Position::new(x, y))
+                        || distillation_qubits.contains(&Position::new(x, y))
+                    {
+                        assert_eq!(*occupancy, BoardOccupancy::PiOver8RotationBlock(op.id()));
+                    } else {
+                        assert_ne!(*occupancy, BoardOccupancy::PiOver8RotationBlock(op.id()));
+                        assert_ne!(*occupancy, BoardOccupancy::DataQubitInOperation(op.id()));
+                    }
+                }
+            }
+            end_cycle_for_pi_over_8_rotation_block.insert(op.id(), end_cycle);
+        }
+        end_cycle_for_pi_over_8_rotation_block
     }
 
     fn new_distillation_states(
@@ -933,14 +1039,20 @@ impl Runner {
                 .collect::<Vec<_>>();
 
             for pos in qubits {
+                let cycle_on_schedule = self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
+                let end_cycle = self.end_cycle_at[(pos.x, pos.y)];
+                if cycle_on_schedule >= end_cycle {
+                    continue;
+                }
+                if !is_associated_with_this_op(
+                    self.schedule[(pos.x, pos.y, cycle_on_schedule)].clone(),
+                ) {
+                    // In this case, this operation does not 'own' this position.
+                    continue;
+                }
+
                 if next_active_qubits.contains(&pos) {
-                    let cycle_on_schedule = self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
-                    let end_cycle = self.end_cycle_at[(pos.x, pos.y)];
-                    let current = if cycle_on_schedule < end_cycle {
-                        Some(self.schedule[(pos.x, pos.y, cycle_on_schedule)].clone())
-                    } else {
-                        None
-                    };
+                    let current = self.schedule[(pos.x, pos.y, cycle_on_schedule)].clone();
                     let next = if cycle_on_schedule + 1 < end_cycle {
                         Some(self.schedule[(pos.x, pos.y, cycle_on_schedule + 1)].clone())
                     } else {
@@ -948,7 +1060,7 @@ impl Runner {
                     };
                     // If the current occupancy is suitable and the next occupancy is not suitable, then
                     // we should add a delay for the next (runtime) cycle.
-                    let should_add_delay = current.map_or(false, is_associated_with_this_op)
+                    let should_add_delay = is_associated_with_this_op(current)
                         && !next.map_or(false, is_associated_with_this_op);
 
                     if should_add_delay {
@@ -956,12 +1068,13 @@ impl Runner {
                     }
                 } else {
                     loop {
-                        let cycle_on_schedule =
+                        let next_cycle_on_schedule =
                             self.runtime_cycle + 1 - self.delay_at[(pos.x, pos.y)];
-                        if cycle_on_schedule >= self.end_cycle_at[(pos.x, pos.y)] {
+                        if next_cycle_on_schedule >= self.end_cycle_at[(pos.x, pos.y)] {
                             break;
                         }
-                        let occupancy = self.schedule[(pos.x, pos.y, cycle_on_schedule)].clone();
+                        let occupancy =
+                            self.schedule[(pos.x, pos.y, next_cycle_on_schedule)].clone();
                         if !is_associated_with_this_op(occupancy) {
                             break;
                         }
@@ -1027,6 +1140,7 @@ impl Runner {
                 break;
             }
 
+            self.check_pi_over_8_rotation_block_ops();
             self.runtime_cycle += 1;
 
             assert!(self.runtime_cycle < 2_000_000_000);
@@ -1042,6 +1156,68 @@ impl Runner {
         let mut rng = thread_rng();
 
         self.run_internal(&mut rng)
+    }
+
+    fn check_pi_over_8_rotation_block_ops(&self) {
+        if self.end_cycle_for_pi_over_8_rotation_block.is_empty() {
+            return;
+        }
+
+        for (id, end_cycle) in &self.end_cycle_for_pi_over_8_rotation_block {
+            let state = if let Some(state) = self.pi_over_8_rotation_block_states.get(id) {
+                state
+            } else {
+                continue;
+            };
+            let (target, routing_qubits, distillation_qubits, pi_over_8_axes) =
+                match &self.operations[id] {
+                    OperationWithAdditionalData::SingleQubitPiOver8RotationBlock {
+                        target,
+                        routing_qubits,
+                        distillation_qubits,
+                        pi_over_8_axes,
+                        ..
+                    } => (target, routing_qubits, distillation_qubits, pi_over_8_axes),
+                    _ => unreachable!(),
+                };
+            match state {
+                SingleQubitPiOver8RotationBlockState::PiOver8Rotation {
+                    index,
+                    lattice_surgery_steps,
+                    ..
+                } => {
+                    if (*index as usize) == pi_over_8_axes.len() - 1
+                        && lattice_surgery_steps == &Some(self.conf.code_distance)
+                    {
+                        continue;
+                    }
+                    assert!(!self.removed_operation_ids.contains(id));
+                    for (x, y) in range_2d(self.conf.width, self.conf.height) {
+                        let cycle_on_schedule = self.runtime_cycle - self.delay_at[(x, y)];
+                        // let occupancy = &self.schedule[(x, y, cycle_on_schedule)];
+                        let pos = Position::new(x, y);
+                        let is_in_block = pos == *target
+                            || routing_qubits.contains(&pos)
+                            || distillation_qubits.contains(&pos);
+                        if is_in_block {
+                            if cycle_on_schedule >= *end_cycle {
+                                println!(
+                                    "id = {:?}, cycle_on_schedule = {}, end_cycle = {}",
+                                    id, cycle_on_schedule, end_cycle
+                                );
+                                println!("delay_at[x, y] = {}", self.delay_at[(x, y)],);
+                                println!("x = {}, y = {}, target = {:?}, routing_qubits = {:?}, distillation_qubits = {:?}", x, y, target, routing_qubits, distillation_qubits);
+                                println!("index = {}, pi_over_8_axes.len = {}, lattice_surgery_steps = {:?}", index, pi_over_8_axes.len(), lattice_surgery_steps);
+                            }
+                            assert!(cycle_on_schedule < *end_cycle);
+                        }
+                    }
+                }
+                SingleQubitPiOver8RotationBlockState::Correction { .. } => {
+                    continue;
+                }
+            }
+        }
     }
 
     pub fn runtime_cycle(&self) -> u32 {
@@ -1088,6 +1264,7 @@ mod tests {
             pi_over_8_rotation_states: HashMap::new(),
             pi_over_8_rotation_block_states: HashMap::new(),
             removed_operation_ids: HashSet::new(),
+            end_cycle_for_pi_over_8_rotation_block: HashMap::new(),
         }
     }
 
@@ -1729,83 +1906,6 @@ mod tests {
         let result = runner.run_internal(&mut rng);
         assert_eq!(result, 11);
         assert_eq!(rng.counter, 2);
-    }
-
-    #[test]
-    fn test_delay_reduction_with_completed_op() {
-        use BoardOccupancy::*;
-        let end_cycle = 10_u32;
-        let mut rng = RngForTesting::new_unusable();
-        let conf = Configuration {
-            width: 4,
-            height: 4,
-            code_distance: 5,
-            magic_state_distillation_cost: 13,
-            magic_state_distillation_success_rate: 0.5,
-            ..default_conf()
-        };
-
-        let mut mapping = DataQubitMapping::new(conf.width, conf.height);
-        let q0 = Qubit::new(0);
-        let q1 = Qubit::new(1);
-        mapping.map(q0, 1, 1);
-        mapping.map(q1, 2, 2);
-
-        let id = OperationId::new(0);
-        let op = OperationWithAdditionalData::SingleQubitPiOver8RotationBlock {
-            id,
-            target: Position::new(1, 1),
-            routing_qubits: vec![Position::new(1, 0)],
-            distillation_qubits: vec![Position::new(2, 0), Position::new(3, 0)],
-            correction_qubits: vec![],
-            pi_over_4_axes: vec![],
-            pi_over_8_axes: vec![Pauli::Z],
-        };
-        let next_id = OperationId::new(1);
-        let next_op = OperationWithAdditionalData::PiOver4Rotation {
-            id: next_id,
-            targets: vec![(Position::new(1, 1), Pauli::Z)],
-            ancilla_qubits: vec![
-                Position::new(1, 0),
-                Position::new(2, 0),
-                Position::new(3, 0),
-            ],
-        };
-
-        let operations = vec![op, next_op];
-
-        let mut schedule = new_occupancy_map(
-            conf.width,
-            conf.height,
-            end_cycle,
-            &[mapping.get(q0).unwrap(), mapping.get(q1).unwrap()],
-        );
-        set_occupancy(&mut schedule, 1, 1, 0..8, DataQubitInOperation(id));
-        set_occupancy(&mut schedule, 1, 0, 0..8, LatticeSurgery(next_id));
-        set_occupancy(&mut schedule, 2, 0, 0..8, PiOver8RotationBlock(id));
-        set_occupancy(&mut schedule, 3, 0, 0..8, PiOver8RotationBlock(id));
-
-        set_occupancy(&mut schedule, 1, 1, 8..9, DataQubitInOperation(next_id));
-        set_occupancy(&mut schedule, 1, 0, 8..9, LatticeSurgery(next_id));
-        set_occupancy(&mut schedule, 2, 0, 8..9, LatticeSurgery(next_id));
-        set_occupancy(&mut schedule, 3, 0, 8..9, LatticeSurgery(next_id));
-
-        let mut runner = new_runner(operations, schedule, &conf);
-
-        runner.delay_at[(1, 1)] = 7;
-        runner.delay_at[(1, 0)] = 8;
-        runner.delay_at[(2, 0)] = 2;
-        runner.delay_at[(3, 0)] = 8;
-        runner.removed_operation_ids.insert(id);
-
-        runner.runtime_cycle = 8;
-        runner.run_internal_step(&mut rng, false);
-
-        assert_eq!(runner.delay_at[(0, 0)], 0);
-        assert_eq!(runner.delay_at[(1, 0)], 8);
-        assert_eq!(runner.delay_at[(1, 1)], 0);
-        assert_eq!(runner.delay_at[(2, 0)], 0);
-        assert_eq!(runner.delay_at[(3, 0)], 0);
     }
 
     #[test]
@@ -3099,6 +3199,105 @@ mod tests {
         assert_eq!(runner.delay_at[(0, 2)], 0);
         assert_eq!(runner.delay_at[(1, 2)], 0);
         assert_eq!(runner.delay_at[(2, 2)], 0);
+    }
+
+    #[test]
+    fn test_overlapping_process_pi_over_8_blocks() {
+        use BoardOccupancy::*;
+        use OperationWithAdditionalData::*;
+        let end_cycle = 65_u32;
+        let conf = Configuration {
+            width: 4,
+            height: 3,
+            code_distance: 3,
+            magic_state_distillation_cost: 2,
+            magic_state_distillation_success_rate: 0.5,
+            ..default_conf()
+        };
+
+        let mut mapping = DataQubitMapping::new(conf.width, conf.height);
+        let q0 = Qubit::new(0);
+        let q1 = Qubit::new(1);
+        mapping.map(q0, 0, 0);
+        mapping.map(q1, 3, 2);
+        let id0 = OperationId::new(0);
+        let id1 = OperationId::new(1);
+        let mut rng = RngForTesting::new_with_zero();
+
+        let operations = vec![
+            SingleQubitPiOver8RotationBlock {
+                id: id0,
+                target: Position::new(0, 0),
+                routing_qubits: vec![
+                    Position::new(1, 0),
+                    Position::new(0, 1),
+                    Position::new(1, 1),
+                ],
+                distillation_qubits: vec![Position::new(2, 0)],
+                correction_qubits: vec![
+                    Position::new(2, 0),
+                    Position::new(1, 0),
+                    Position::new(0, 1),
+                ],
+                pi_over_8_axes: vec![Pauli::Z],
+                pi_over_4_axes: vec![],
+            },
+            SingleQubitPiOver8RotationBlock {
+                id: id1,
+                target: Position::new(3, 2),
+                routing_qubits: vec![
+                    Position::new(3, 1),
+                    Position::new(2, 1),
+                    Position::new(2, 2),
+                ],
+                distillation_qubits: vec![
+                    Position::new(3, 0),
+                    Position::new(1, 1),
+                    Position::new(0, 1),
+                    Position::new(1, 0),
+                ],
+                correction_qubits: vec![
+                    Position::new(3, 0),
+                    Position::new(3, 1),
+                    Position::new(2, 2),
+                ],
+                pi_over_8_axes: vec![Pauli::Z],
+                pi_over_4_axes: vec![],
+            },
+        ];
+
+        let mut schedule =
+            new_occupancy_map(conf.width, conf.height, end_cycle, &[mapping.get(q0).unwrap()]);
+
+        set_occupancy(&mut schedule, 0, 0, 45..55, DataQubitInOperation(id0));
+        set_occupancy(&mut schedule, 1, 0, 45..55, PiOver8RotationBlock(id0));
+        set_occupancy(&mut schedule, 2, 0, 45..55, PiOver8RotationBlock(id0));
+        set_occupancy(&mut schedule, 0, 1, 45..55, PiOver8RotationBlock(id0));
+        set_occupancy(&mut schedule, 1, 1, 45..55, PiOver8RotationBlock(id0));
+
+        set_occupancy(&mut schedule, 3, 2, 55..65, DataQubitInOperation(id1));
+        set_occupancy(&mut schedule, 1, 0, 55..65, PiOver8RotationBlock(id1));
+        set_occupancy(&mut schedule, 3, 0, 55..65, PiOver8RotationBlock(id1));
+        set_occupancy(&mut schedule, 0, 1, 55..65, PiOver8RotationBlock(id1));
+        set_occupancy(&mut schedule, 1, 1, 55..65, PiOver8RotationBlock(id1));
+        set_occupancy(&mut schedule, 2, 1, 55..65, PiOver8RotationBlock(id1));
+        set_occupancy(&mut schedule, 3, 1, 55..65, PiOver8RotationBlock(id1));
+        set_occupancy(&mut schedule, 2, 2, 55..65, PiOver8RotationBlock(id1));
+
+        let mut runner = new_runner(operations, schedule, &conf);
+        runner.delay_at[(0, 0)] = 45;
+        runner.runtime_cycle = 45;
+
+        while runner.removed_operation_ids.len() < 2 {
+            runner.run_internal_step(&mut rng, true);
+            runner.runtime_cycle += 1;
+
+            // This assertion is flaky because it depends on the iteration of of
+            // `runner.pi_over_8_rotation_block_states` which is not deterministic.
+            assert!(runner.runtime_cycle < 1000);
+        }
+
+        assert_eq!(runner.runtime_cycle, 103);
     }
 
     #[test]
