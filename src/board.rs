@@ -2804,7 +2804,8 @@ mod tests {
         assert!(board.schedule_single_qubit_pi_over_8_rotation(Qubit::new(0), Pauli::Z, 5, 2));
         let id = OperationId { id: 0 };
 
-        assert!(board.is_occupancy(0, 0, 0..15, MagicStateDistillation(id)));
+        assert!(board.is_occupancy(0, 0, 0..5, Vacant));
+        assert!(board.is_occupancy(0, 0, 5..15, MagicStateDistillation(id)));
         assert!(board.is_occupancy(0, 0, 15..18, LatticeSurgery(id)));
         assert!(board.is_occupancy(0, 0, 18..21, YMeasurement(id)));
         assert!(board.is_occupancy(0, 1, 0..15, IdleDataQubit));
@@ -2812,7 +2813,8 @@ mod tests {
         assert!(board.is_occupancy(0, 1, 18..21, IdleDataQubit));
         assert!(board.is_occupancy(0, 2, 0..21, IdleDataQubit));
         assert!(board.is_occupancy(0, 3, 0..21, Vacant));
-        assert!(board.is_occupancy(1, 0, 0..15, MagicStateDistillation(id)));
+        assert!(board.is_occupancy(1, 0, 0..5, Vacant));
+        assert!(board.is_occupancy(1, 0, 5..15, MagicStateDistillation(id)));
         assert!(board.is_occupancy(1, 0, 15..18, LatticeSurgery(id)));
         assert!(board.is_occupancy(1, 0, 18..21, YMeasurement(id)));
         assert!(board.is_occupancy(1, 1, 0..21, Vacant));
@@ -2889,13 +2891,15 @@ mod tests {
         assert!(board.is_occupancy(0, 2, 0..21, IdleDataQubit));
         assert!(board.is_occupancy(0, 3, 0..21, Vacant));
         assert!(board.is_occupancy(1, 0, 0..21, Vacant));
-        assert!(board.is_occupancy(1, 1, 0..15, MagicStateDistillation(id)));
+        assert!(board.is_occupancy(1, 1, 0..5, Vacant));
+        assert!(board.is_occupancy(1, 1, 5..15, MagicStateDistillation(id)));
         assert!(board.is_occupancy(1, 1, 15..18, LatticeSurgery(id)));
         assert!(board.is_occupancy(1, 1, 18..21, YMeasurement(id)));
         assert!(board.is_occupancy(1, 2, 0..21, Vacant));
         assert!(board.is_occupancy(1, 3, 0..21, Vacant));
         assert!(board.is_occupancy(2, 0, 0..21, Vacant));
-        assert!(board.is_occupancy(2, 1, 0..15, MagicStateDistillation(id)));
+        assert!(board.is_occupancy(2, 1, 0..5, Vacant));
+        assert!(board.is_occupancy(2, 1, 5..15, MagicStateDistillation(id)));
         assert!(board.is_occupancy(2, 1, 15..18, LatticeSurgery(id)));
         assert!(board.is_occupancy(2, 1, 18..21, YMeasurement(id)));
         assert!(board.is_occupancy(2, 2, 0..21, Vacant));
