@@ -339,9 +339,9 @@ def create_normalizer_and_color_map() -> tuple[matplotlib.colors.Normalize, matp
     norm_dict = {id: (id - vmin) / (vmax - vmin) for id in type_ids}
 
     clist: list[tuple[float, tuple[float, float, float]]] = [
-        (norm_dict[Vacant.class_id()], (0xdd, 0xdd, 0xdd)),
-        (norm_dict[IdleDataQubit.class_id()], (0x4d, 0xe1, 0xf2)),
-        (norm_dict[DataQubitInOperation.class_id()], (0xb1, 0xa8, 0xe3)),
+        (norm_dict[Vacant.class_id()], (0xee, 0xee, 0xee)),
+        (norm_dict[IdleDataQubit.class_id()], (0xcd, 0xda, 0xf6)),
+        (norm_dict[DataQubitInOperation.class_id()], (0xb1, 0xa8, 0xd3)),
         (norm_dict[LatticeSurgery.class_id()], (0x7c, 0xa5, 0x58)),
         (norm_dict[YInitialization.class_id()], (0xcc, 0x6f, 0x68)),
         (norm_dict[YMeasurement.class_id()], (0xcc, 0x6f, 0x68)),
@@ -399,7 +399,7 @@ def visualize(schedule: Schedule, path_pattern: str, cycle_range: Iterable[int] 
         ax.set_xticks([])
         ax.set_yticks([])
 
-        plt.savefig(path)
+        plt.savefig(path, transparent=True)
         plt.close()
 
 
