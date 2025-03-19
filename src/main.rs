@@ -217,7 +217,7 @@ fn extract_angle(s: &str, context: &str) -> Result<Angle, String> {
     let minus_pattern = regex::Regex::new(r"^ * - *([0-9]+\.[0-9]+) *$").unwrap();
     if s.trim() == "" {
         Err(format!("{}: angle must not be empty", context))
-    } else if s.trim() == "0" {
+    } else if s.trim() == "0" || s.trim() == "2  *  pi" {
         Ok(Angle::Zero)
     } else if s.trim() == "pi" || s.trim() == "-  pi" {
         // This apparent inconsistency is intentional: see above.
@@ -1175,6 +1175,7 @@ mod tests {
     #[test]
     fn test_extract_angle() {
         assert_eq!(extract_angle("0", "test"), Ok(Angle::Zero));
+        assert_eq!(extract_angle(" 2  *  pi", "test"), Ok(Angle::Zero));
         assert_eq!(extract_angle("", "test"), Err("test: angle must not be empty".to_string()));
         assert_eq!(extract_angle(" pi ", "test"), Ok(Angle::PiOver2));
         // We expect a space before "pi".
