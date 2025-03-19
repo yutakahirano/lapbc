@@ -287,6 +287,8 @@ pub struct Configuration {
     pub single_qubit_pi_over_8_rotation_block_depth_ratio: f64,
     pub single_qubit_arbitrary_angle_rotation_precision: f64,
     pub preferable_distillation_area_size: u32,
+
+    pub enable_two_qubit_pi_over_4_rotation_with_y_initialization: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -592,8 +594,11 @@ impl Board {
 
         let mut found = false;
         let mut ancilla_qubits = vec![];
+        let conf = &self.conf;
 
-        if cycle >= y_initialization_cost {
+        if conf.enable_two_qubit_pi_over_4_rotation_with_y_initialization
+            && cycle >= y_initialization_cost
+        {
             for &(x, y) in ancilla_candidates {
                 if self.is_vacant(x, y, cycle - y_initialization_cost..cycle + distance) {
                     let cycle_range = cycle - y_initialization_cost..cycle;
@@ -1683,6 +1688,7 @@ mod tests {
             single_qubit_pi_over_8_rotation_block_depth_ratio: 1.2,
             single_qubit_arbitrary_angle_rotation_precision: 1e-10,
             preferable_distillation_area_size: 5,
+            enable_two_qubit_pi_over_4_rotation_with_y_initialization: false,
         }
     }
 
@@ -1991,6 +1997,7 @@ mod tests {
         mapping.map(Qubit::new(1), 1, 1);
         mapping.map(Qubit::new(2), 2, 2);
         let mut board = new_board(mapping, 3);
+        board.conf.enable_two_qubit_pi_over_4_rotation_with_y_initialization = true;
         board.ensure_board_occupancy(5);
 
         let id = board.issue_operation_id();
@@ -2480,6 +2487,7 @@ mod tests {
         mapping.map(Qubit::new(0), 0, 0);
         mapping.map(Qubit::new(1), 1, 3);
         let mut board = new_board(mapping, 3);
+        board.conf.enable_two_qubit_pi_over_4_rotation_with_y_initialization = true;
         board.ensure_board_occupancy(11);
         board.set_occupancy(1, 1, 3, YMeasurement(dummy_id));
         board.set_occupancy(1, 2, 4, YMeasurement(dummy_id));

@@ -1322,6 +1322,7 @@ mod tests {
             single_qubit_pi_over_8_rotation_block_depth_ratio: 1.2,
             single_qubit_arbitrary_angle_rotation_precision: 1e-10,
             preferable_distillation_area_size: 5,
+            enable_two_qubit_pi_over_4_rotation_with_y_initialization: false,
         }
     }
 
