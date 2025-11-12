@@ -38,6 +38,42 @@ Using `cargo run [--release]` is the simplest way:
 Alternatively, you can directly run the compiled binary:
 ```bash
 [yhirano@host lapbc]$ target/release/lapbc --filename=in.qasm --mapping-filename=data/6x6.mapping.json
+Args:
+  filename = in.qasm
+  mapping filename = data/6x6.mapping.json
+  output source filename = None
+  file format = None
+  schedule output filename = None
+  print_operations = false
+  use_pi_over_8_rotation_block = false
+  code_distance = 15
+  magic_state_distillation_cost = 21
+  magic_state_distillation_success_probability = 0.5
+  num_distillations_for_pi_over_8_rotation = 6
+  num_distillations_for_pi_over_8_rotation_block = 3
+  single_qubit_pi_over_8_rotation_block_depth_ratio = 1.1
+  single_qubit_arbitrary_angle_rotation_precision = 1e-10
+  preferable_distillation_area_size = 5
+  parallelism = 1
+  num_executions = 10
+
+Parsing the QASM file...done.
+num lapbc ops = 871
+spc_ops.len = 271, len * distance = 4065, spc cycles = 4065
+num cycles (without blocks) = 2881
+Scheduling is done.
+Run (WithoutBlocks): runtime cycle = 2881, delay = 0
+Run (WithoutBlocks): runtime cycle = 2881, delay = 0
+Run (WithoutBlocks): runtime cycle = 2890, delay = 9
+Run (WithoutBlocks): runtime cycle = 2881, delay = 0
+Run (WithoutBlocks): runtime cycle = 2889, delay = 8
+Run (WithoutBlocks): runtime cycle = 2881, delay = 0
+Run (WithoutBlocks): runtime cycle = 2881, delay = 0
+Run (WithoutBlocks): runtime cycle = 2881, delay = 0
+Run (WithoutBlocks): runtime cycle = 2881, delay = 0
+Run (WithoutBlocks): runtime cycle = 2930, delay = 49
+Average runtime cycles[without blocks] = 2887.6
+Average delay[without blocks] = 6.6
 ```
 
 Here, `in.qasm` is the input QASM program, and `data/6x6.mapping.json` is the qubit mapping configuration.
