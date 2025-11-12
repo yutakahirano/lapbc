@@ -80,3 +80,15 @@ Here, `in.qasm` is the input QASM program, and `data/6x6.mapping.json` is the qu
 
 The available command-line options are defined in the struct `Args` in [main.rs](src/main.rs).
 
+### Caveats
+ - You need to prepare `qelib1.inc` and place it in the top directory.
+ - The QASM loading library we use is very slow. For larger programs, it is recommended to convert the QASM file into an internal JSON representation.
+   This can be done with the following command:
+   ```
+   [yhirano@host lapbc]$ target/release/lapbc ... --filename=in.qasm --output-source-filename=out.json
+   ```
+   Then the JSON representation is stored in `out.json`, which can be reused for subsequent runs:
+   ```
+   [yhirano@host lapbc]$ target/release/lapbc ... --filename=in.qasm --file-format=JSON
+   ```
+
