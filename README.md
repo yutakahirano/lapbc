@@ -89,6 +89,6 @@ The available command-line options are defined in the struct `Args` in [main.rs]
    ```
    Then the JSON representation is stored in `out.json`, which can be reused for subsequent runs:
    ```
-   [yhirano@host lapbc]$ target/release/lapbc ... --filename=in.qasm --file-format=JSON
+   [yhirano@host lapbc]$ target/release/lapbc ... --filename=out.json --file-format=JSON
    ```
 
