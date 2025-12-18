@@ -92,3 +92,26 @@ The available command-line options are defined in the struct `Args` in [main.rs]
    [yhirano@host lapbc]$ target/release/lapbc ... --filename=out.json --file-format=JSON
    ```
 
+### Visualizing Schedules
+You can output the scheduling result using the `--schedule-output-filename` command-line argument.
+
+```bash
+[yhirano@host lapbc]$ target/release/lapbc --filename=in.qasm --mapping-filename=data/6x6.mapping.json \
+                                           --schedule-output-filename=schedule.json
+```
+
+The resulting schedule can be visualized using `visualizer/visualize.py`.
+This script does not provide a command-line interface; instead, its functionality is accessed via the Python interactive shell.
+
+```bash
+[yhirano@host lapbc]$ cd visualizer
+[yhirano@host visualizer]$ python3
+Python 3.12.3 (main, Nov  6 2025, 13:44:16) [GCC 13.3.0] on linux
+Type "help", "copyright", "credits" or "license" for more information.
+>>> import visualize
+>>> schedule = visualize.load_schedule('../schedule.json')
+>>> visualize.visualize(schedule, '../schedule', range(10, 30))
+>>> visualize.generate_animation(schedule, '../schedule.gif', range(10, 30))
+```
+
+`visualize.visualize` generates PNG image files, while `visualize.generate_animation` generates an animated GIF for the specified cycle range.
