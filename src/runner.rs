@@ -187,6 +187,20 @@ enum SingleQubitPiOver8RotationBlockState {
     },
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum ArbitraryAngleRotationState {
+    Distillation {
+        steps: u32,
+        angle: f64,
+        has_resource_state: bool,
+    },
+    LatticeSurgery {
+        steps: u32,
+        angle: f64,
+        gate_teleportation_succeeded: bool,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub struct Runner {
     operations: HashMap<OperationId, OperationWithAdditionalData>,
@@ -199,6 +213,7 @@ pub struct Runner {
     pi_over_4_rotation_states: HashMap<OperationId, PiOver4RotationState>,
     pi_over_8_rotation_states: HashMap<OperationId, PiOver8RotationState>,
     pi_over_8_rotation_block_states: HashMap<OperationId, SingleQubitPiOver8RotationBlockState>,
+    arbitrary_angle_rotation_states: HashMap<OperationId, ArbitraryAngleRotationState>,
     removed_operation_ids: HashSet<OperationId>,
 
     // This is for checking / debugging.
@@ -235,6 +250,7 @@ impl Runner {
             pi_over_4_rotation_states: HashMap::new(),
             pi_over_8_rotation_states: HashMap::new(),
             pi_over_8_rotation_block_states: HashMap::new(),
+            arbitrary_angle_rotation_states: HashMap::new(),
             removed_operation_ids: HashSet::new(),
             end_cycle_for_pi_over_8_rotation_block: HashMap::new(),
         };
@@ -453,6 +469,15 @@ impl Runner {
                             }
                         });
                 }
+                &SingleQubitArbitraryAngleRotation { angle, .. } => {
+                    self.arbitrary_angle_rotation_states
+                        .entry(id)
+                        .or_insert_with(|| ArbitraryAngleRotationState::Distillation {
+                            steps: 0,
+                            angle,
+                            has_resource_state: false,
+                        });
+                }
             }
         }
     }
@@ -631,6 +656,68 @@ impl Runner {
         }
     }
 
+    fn perform_arbitrary_angle_rotation_state_transiton(&mut self) {
+        use BoardOccupancy::*;
+        use OperationWithAdditionalData::*;
+        let mut to_be_removed = vec![];
+        for (id, state) in &mut self.arbitrary_angle_rotation_states {
+            let op = &self.operations[id];
+            let (target_position, routing_qubits) = match op {
+                SingleQubitArbitraryAngleRotation {
+                    target,
+                    routing_qubits,
+                    ..
+                } => (target, routing_qubits),
+                _ => unreachable!(),
+            };
+            let is_ready = |pos: &Position| {
+                let cycle_on_schedule = self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
+                let occupancy = &self.schedule[(pos.x, pos.y, cycle_on_schedule)];
+                matches!(occupancy, LatticeSurgery(id) | DataQubitInOperation(id) if *id == op.id())
+            };
+
+            match state {
+                ArbitraryAngleRotationState::Distillation {
+                    angle,
+                    has_resource_state,
+                    ..
+                } => {
+                    if *has_resource_state
+                        && is_ready(target_position)
+                        && routing_qubits.iter().all(is_ready)
+                    {
+                        *state = ArbitraryAngleRotationState::LatticeSurgery {
+                            steps: 0,
+                            angle: *angle,
+                            gate_teleportation_succeeded: false,
+                        };
+                    }
+                }
+                ArbitraryAngleRotationState::LatticeSurgery {
+                    steps,
+                    angle,
+                    gate_teleportation_succeeded,
+                } => {
+                    if *steps == self.conf.code_distance {
+                        if *gate_teleportation_succeeded {
+                            to_be_removed.push(*id);
+                        } else {
+                            *state = ArbitraryAngleRotationState::Distillation {
+                                steps: 0,
+                                angle: -2.0 * *angle,
+                                has_resource_state: false,
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        self.removed_operation_ids.extend(to_be_removed.iter());
+        for id in to_be_removed {
+            self.arbitrary_angle_rotation_states.remove(&id);
+        }
+    }
+
     fn process_pi_over_4_rotation(&mut self) {
         use BoardOccupancy::*;
         for (id, state) in &mut self.pi_over_4_rotation_states {
@@ -729,6 +816,109 @@ impl Runner {
                 }
                 PiOver8RotationState::Correction { steps } => {
                     *steps += 1;
+                }
+            }
+        }
+    }
+
+    fn process_arbitrary_angle_rotation<R: Rng>(&mut self, rng: &mut R) {
+        use OperationWithAdditionalData::*;
+        for (id, state) in &mut self.arbitrary_angle_rotation_states {
+            let op = &self.operations[id];
+            let (target_position, routing_qubits, distillation_qubit) = match op {
+                SingleQubitArbitraryAngleRotation {
+                    target,
+                    routing_qubits,
+                    distillation_qubit,
+                    ..
+                } => (target, routing_qubits, distillation_qubit),
+                _ => unreachable!(),
+            };
+
+            let is_ready = |pos: &Position| {
+                let cycle_on_schedule = self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
+                let occupancy = &self.schedule[(pos.x, pos.y, cycle_on_schedule)];
+                occupancy.operation_id() == Some(*id)
+            };
+
+            match state {
+                ArbitraryAngleRotationState::Distillation {
+                    steps,
+                    has_resource_state,
+                    ..
+                } => {
+                    assert!(is_ready(distillation_qubit));
+                    assert!(!*has_resource_state);
+
+                    *steps += 1;
+
+                    let add_delay = |pos: &Position| {
+                        let cycle_on_schedule = self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
+                        let occupancy = &self.schedule[(pos.x, pos.y, cycle_on_schedule)];
+                        if occupancy.operation_id() == Some(*id) {
+                            self.delay_at[(pos.x, pos.y)] += 1;
+                        }
+                    };
+                    let positions = std::iter::once(target_position).chain(routing_qubits);
+                    positions.for_each(add_delay);
+
+                    if *steps >= self.conf.star_resource_state_distillation_cost {
+                        let success_rate = self.conf.star_resource_state_distillation_success_rate;
+                        *has_resource_state = rng.gen_range(0.0..1.0) <= success_rate;
+                        *steps = 0;
+
+                        if !*has_resource_state {
+                            let pos = distillation_qubit;
+                            let cycle_on_schedule =
+                                self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
+                            let occupancy = &self.schedule[(pos.x, pos.y, cycle_on_schedule)];
+                            assert_eq!(occupancy.operation_id(), Some(*id));
+                            self.delay_at[(pos.x, pos.y)] +=
+                                self.conf.star_resource_state_distillation_cost;
+                        }
+                    }
+                }
+                ArbitraryAngleRotationState::LatticeSurgery {
+                    steps,
+                    gate_teleportation_succeeded,
+                    ..
+                } => {
+                    assert!(is_ready(distillation_qubit));
+                    assert!(routing_qubits.iter().all(is_ready));
+                    assert!(is_ready(target_position));
+                    assert!(!*gate_teleportation_succeeded);
+
+                    *steps += 1;
+                    if *steps >= self.conf.code_distance {
+                        // Gate teleportation success rate is always 0.5.
+                        *gate_teleportation_succeeded = rng.gen_range(0.0..1.0) <= 0.5;
+                        if !*gate_teleportation_succeeded {
+                            let add_delay = |pos: &Position| {
+                                let cycle_on_schedule =
+                                    self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
+                                let occupancy = &self.schedule[(pos.x, pos.y, cycle_on_schedule)];
+                                let old_occupancy = &self.schedule[(
+                                    pos.x,
+                                    pos.y,
+                                    cycle_on_schedule - self.conf.code_distance + 1,
+                                )];
+                                let distance = self.conf.code_distance;
+
+                                assert!(occupancy.operation_id() == Some(*id));
+                                assert!(old_occupancy.operation_id() == Some(*id));
+                                if pos == distillation_qubit {
+                                    self.delay_at[(pos.x, pos.y)] +=
+                                        distance + self.conf.star_resource_state_distillation_cost;
+                                } else {
+                                    self.delay_at[(pos.x, pos.y)] += distance;
+                                }
+                            };
+                            let positions = std::iter::once(target_position)
+                                .chain(routing_qubits)
+                                .chain(std::iter::once(distillation_qubit));
+                            positions.for_each(add_delay);
+                        }
+                    }
                 }
             }
         }
@@ -1122,9 +1312,11 @@ impl Runner {
         self.perform_pi_over_4_rotation_state_transition();
         self.perform_pi_over_8_rotation_state_transition();
         self.perform_pi_over_8_rotation_block_state_transition();
+        self.perform_arbitrary_angle_rotation_state_transiton();
         self.process_pi_over_4_rotation();
         self.process_pi_over_8_rotation(rng);
         self.process_pi_over_8_rotation_block(rng);
+        self.process_arbitrary_angle_rotation(rng);
     }
 
     fn run_internal<R: Rng>(&mut self, rng: &mut R) -> u32 {
@@ -1263,6 +1455,7 @@ mod tests {
             pi_over_4_rotation_states: HashMap::new(),
             pi_over_8_rotation_states: HashMap::new(),
             pi_over_8_rotation_block_states: HashMap::new(),
+            arbitrary_angle_rotation_states: HashMap::new(),
             removed_operation_ids: HashSet::new(),
             end_cycle_for_pi_over_8_rotation_block: HashMap::new(),
         }
@@ -1323,6 +1516,10 @@ mod tests {
             single_qubit_arbitrary_angle_rotation_precision: 1e-10,
             preferable_distillation_area_size: 5,
             enable_two_qubit_pi_over_4_rotation_with_y_initialization: false,
+
+            use_star_resource_states: false,
+            star_resource_state_distillation_cost: 0,
+            star_resource_state_distillation_success_rate: 0.0,
         }
     }
 
@@ -3924,6 +4121,254 @@ mod tests {
         assert_eq!(runner.delay_at[(2, 2)], 0);
         assert_eq!(runner.delay_at[(0, 3)], 47);
         assert_eq!(runner.delay_at[(1, 3)], 0);
+        assert_eq!(runner.delay_at[(2, 3)], 0);
+    }
+
+    #[test]
+    fn test_with_star_rotation_without_delay() {
+        use BoardOccupancy::*;
+        let end_cycle = 22_u32;
+        let mut rng = RngForTesting::new_with_zero();
+        let conf = Configuration {
+            width: 3,
+            height: 4,
+            code_distance: 5,
+            magic_state_distillation_cost: 13,
+            magic_state_distillation_success_rate: 0.5,
+            star_resource_state_distillation_cost: 13,
+            star_resource_state_distillation_success_rate: 0.5,
+            use_star_resource_states: true,
+            ..default_conf()
+        };
+
+        let mut mapping = DataQubitMapping::new(conf.width, conf.height);
+        let q0 = Qubit::new(0);
+        let q1 = Qubit::new(1);
+        mapping.map(q0, 0, 0);
+        mapping.map(q1, 0, 1);
+
+        let id = OperationId::new(0);
+        let operations = vec![
+            OperationWithAdditionalData::SingleQubitArbitraryAngleRotation {
+                id,
+                angle: 0.4,
+                target: p(0, 0),
+                routing_qubits: vec![p(0, 1)],
+                distillation_qubit: p(0, 2),
+            },
+        ];
+
+        let mut schedule = new_occupancy_map(
+            conf.width,
+            conf.height,
+            end_cycle,
+            &[mapping.get(q0).unwrap(), mapping.get(q1).unwrap()],
+        );
+        set_occupancy(&mut schedule, 0, 0, 13..18, DataQubitInOperation(id));
+        set_occupancy(&mut schedule, 0, 2, 0..18, MagicStateDistillation(id));
+        set_occupancy(&mut schedule, 0, 1, 13..18, LatticeSurgery(id));
+
+        let mut runner = new_runner(operations, schedule, &conf);
+        let result = runner.run_internal(&mut rng);
+
+        assert_eq!(result, 0);
+        assert_eq!(runner.delay_at[(0, 0)], 0);
+        assert_eq!(runner.delay_at[(0, 1)], 0);
+        assert_eq!(runner.delay_at[(0, 2)], 0);
+        assert_eq!(runner.delay_at[(0, 3)], 0);
+        assert_eq!(runner.delay_at[(1, 0)], 0);
+        assert_eq!(runner.delay_at[(1, 1)], 0);
+        assert_eq!(runner.delay_at[(1, 2)], 0);
+        assert_eq!(runner.delay_at[(1, 3)], 0);
+        assert_eq!(runner.delay_at[(2, 0)], 0);
+        assert_eq!(runner.delay_at[(2, 1)], 0);
+        assert_eq!(runner.delay_at[(2, 2)], 0);
+        assert_eq!(runner.delay_at[(2, 3)], 0);
+    }
+
+    #[test]
+    fn test_with_star_rotation_with_distillation_failure() {
+        use BoardOccupancy::*;
+        let end_cycle = 22_u32;
+        let mut rng = RngForTesting::new(&[u64::MAX, u64::MAX, 0, 0]);
+        let conf = Configuration {
+            width: 3,
+            height: 4,
+            code_distance: 5,
+            magic_state_distillation_cost: 13,
+            magic_state_distillation_success_rate: 0.5,
+            star_resource_state_distillation_cost: 13,
+            star_resource_state_distillation_success_rate: 0.5,
+            use_star_resource_states: true,
+            ..default_conf()
+        };
+
+        let mut mapping = DataQubitMapping::new(conf.width, conf.height);
+        let q0 = Qubit::new(0);
+        let q1 = Qubit::new(1);
+        mapping.map(q0, 0, 0);
+        mapping.map(q1, 0, 1);
+
+        let id = OperationId::new(0);
+        let operations = vec![
+            OperationWithAdditionalData::SingleQubitArbitraryAngleRotation {
+                id,
+                angle: 0.4,
+                target: p(0, 0),
+                routing_qubits: vec![p(0, 1)],
+                distillation_qubit: p(0, 2),
+            },
+        ];
+
+        let mut schedule = new_occupancy_map(
+            conf.width,
+            conf.height,
+            end_cycle,
+            &[mapping.get(q0).unwrap(), mapping.get(q1).unwrap()],
+        );
+        set_occupancy(&mut schedule, 0, 0, 13..18, DataQubitInOperation(id));
+        set_occupancy(&mut schedule, 0, 1, 13..18, LatticeSurgery(id));
+        set_occupancy(&mut schedule, 0, 2, 0..18, MagicStateDistillation(id));
+
+        let mut runner = new_runner(operations, schedule, &conf);
+        let result = runner.run_internal(&mut rng);
+
+        assert_eq!(result, 26);
+        assert_eq!(runner.delay_at[(0, 0)], 26);
+        assert_eq!(runner.delay_at[(0, 1)], 26);
+        assert_eq!(runner.delay_at[(0, 2)], 26);
+        assert_eq!(runner.delay_at[(0, 3)], 0);
+        assert_eq!(runner.delay_at[(1, 0)], 0);
+        assert_eq!(runner.delay_at[(1, 1)], 0);
+        assert_eq!(runner.delay_at[(1, 2)], 0);
+        assert_eq!(runner.delay_at[(1, 3)], 0);
+        assert_eq!(runner.delay_at[(2, 0)], 0);
+        assert_eq!(runner.delay_at[(2, 1)], 0);
+        assert_eq!(runner.delay_at[(2, 2)], 0);
+        assert_eq!(runner.delay_at[(2, 3)], 0);
+    }
+
+    #[test]
+    fn test_with_star_rotation_with_gate_teleportation_failure() {
+        use BoardOccupancy::*;
+        let end_cycle = 22_u32;
+        let mut rng = RngForTesting::new(&[0, u64::MAX, 0, 0]);
+        let conf = Configuration {
+            width: 3,
+            height: 4,
+            code_distance: 5,
+            magic_state_distillation_cost: 13,
+            magic_state_distillation_success_rate: 0.5,
+            star_resource_state_distillation_cost: 13,
+            star_resource_state_distillation_success_rate: 0.5,
+            use_star_resource_states: true,
+            ..default_conf()
+        };
+
+        let mut mapping = DataQubitMapping::new(conf.width, conf.height);
+        let q0 = Qubit::new(0);
+        let q1 = Qubit::new(1);
+        mapping.map(q0, 0, 0);
+        mapping.map(q1, 0, 1);
+
+        let id = OperationId::new(0);
+        let operations = vec![
+            OperationWithAdditionalData::SingleQubitArbitraryAngleRotation {
+                id,
+                angle: 0.4,
+                target: p(0, 0),
+                routing_qubits: vec![p(0, 1)],
+                distillation_qubit: p(0, 2),
+            },
+        ];
+
+        let mut schedule = new_occupancy_map(
+            conf.width,
+            conf.height,
+            end_cycle,
+            &[mapping.get(q0).unwrap(), mapping.get(q1).unwrap()],
+        );
+        set_occupancy(&mut schedule, 0, 0, 13..18, DataQubitInOperation(id));
+        set_occupancy(&mut schedule, 0, 1, 13..18, LatticeSurgery(id));
+        set_occupancy(&mut schedule, 0, 2, 0..18, MagicStateDistillation(id));
+
+        let mut runner = new_runner(operations, schedule, &conf);
+        let result = runner.run_internal(&mut rng);
+
+        assert_eq!(result, 18);
+        assert_eq!(runner.delay_at[(0, 0)], 18);
+        assert_eq!(runner.delay_at[(0, 1)], 18);
+        assert_eq!(runner.delay_at[(0, 2)], 18);
+        assert_eq!(runner.delay_at[(0, 3)], 0);
+        assert_eq!(runner.delay_at[(1, 0)], 0);
+        assert_eq!(runner.delay_at[(1, 1)], 0);
+        assert_eq!(runner.delay_at[(1, 2)], 0);
+        assert_eq!(runner.delay_at[(1, 3)], 0);
+        assert_eq!(runner.delay_at[(2, 0)], 0);
+        assert_eq!(runner.delay_at[(2, 1)], 0);
+        assert_eq!(runner.delay_at[(2, 2)], 0);
+        assert_eq!(runner.delay_at[(2, 3)], 0);
+    }
+
+    #[test]
+    fn test_with_star_rotation_with_distillation_and_gate_teleportation_failures() {
+        use BoardOccupancy::*;
+        let end_cycle = 22_u32;
+        let mut rng = RngForTesting::new(&[u64::MAX, 0, u64::MAX, u64::MAX, 0, 0]);
+        let conf = Configuration {
+            width: 3,
+            height: 4,
+            code_distance: 5,
+            magic_state_distillation_cost: 13,
+            magic_state_distillation_success_rate: 0.5,
+            star_resource_state_distillation_cost: 13,
+            star_resource_state_distillation_success_rate: 0.5,
+            use_star_resource_states: true,
+            ..default_conf()
+        };
+
+        let mut mapping = DataQubitMapping::new(conf.width, conf.height);
+        let q0 = Qubit::new(0);
+        let q1 = Qubit::new(1);
+        mapping.map(q0, 0, 0);
+        mapping.map(q1, 0, 1);
+
+        let id = OperationId::new(0);
+        let operations = vec![
+            OperationWithAdditionalData::SingleQubitArbitraryAngleRotation {
+                id,
+                angle: 0.4,
+                target: p(0, 0),
+                routing_qubits: vec![p(0, 1)],
+                distillation_qubit: p(0, 2),
+            },
+        ];
+
+        let mut schedule = new_occupancy_map(
+            conf.width,
+            conf.height,
+            end_cycle,
+            &[mapping.get(q0).unwrap(), mapping.get(q1).unwrap()],
+        );
+        set_occupancy(&mut schedule, 0, 0, 13..18, DataQubitInOperation(id));
+        set_occupancy(&mut schedule, 0, 1, 13..18, LatticeSurgery(id));
+        set_occupancy(&mut schedule, 0, 2, 0..18, MagicStateDistillation(id));
+
+        let mut runner = new_runner(operations, schedule, &conf);
+        let result = runner.run_internal(&mut rng);
+
+        assert_eq!(result, 44);
+        assert_eq!(runner.delay_at[(0, 0)], 44);
+        assert_eq!(runner.delay_at[(0, 1)], 44);
+        assert_eq!(runner.delay_at[(0, 2)], 44);
+        assert_eq!(runner.delay_at[(0, 3)], 0);
+        assert_eq!(runner.delay_at[(1, 0)], 0);
+        assert_eq!(runner.delay_at[(1, 1)], 0);
+        assert_eq!(runner.delay_at[(1, 2)], 0);
+        assert_eq!(runner.delay_at[(1, 3)], 0);
+        assert_eq!(runner.delay_at[(2, 0)], 0);
+        assert_eq!(runner.delay_at[(2, 1)], 0);
+        assert_eq!(runner.delay_at[(2, 2)], 0);
         assert_eq!(runner.delay_at[(2, 3)], 0);
     }
 }

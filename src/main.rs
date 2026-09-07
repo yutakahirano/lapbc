@@ -1039,6 +1039,10 @@ fn main() {
             .single_qubit_arbitrary_angle_rotation_precision,
         preferable_distillation_area_size: args.preferable_distillation_area_size,
         enable_two_qubit_pi_over_4_rotation_with_y_initialization: false,
+
+        use_star_resource_states: false,
+        star_resource_state_distillation_cost: 0,
+        star_resource_state_distillation_success_rate: 0.0,
     };
 
     let angle_map = generate_random_pauli_axes_for_arbitrary_angle_rotations(
@@ -1171,6 +1175,10 @@ mod tests {
             single_qubit_arbitrary_angle_rotation_precision: 1e-10,
             preferable_distillation_area_size: 5,
             enable_two_qubit_pi_over_4_rotation_with_y_initialization: false,
+
+            use_star_resource_states: false,
+            star_resource_state_distillation_cost: 0,
+            star_resource_state_distillation_success_rate: 0.0,
         }
     }
 

@@ -62,7 +62,7 @@ impl serde::Serialize for Targets<'_> {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum OperationWithAdditionalData {
     PiOver4Rotation {
         id: OperationId,
@@ -86,6 +86,14 @@ pub enum OperationWithAdditionalData {
         pi_over_8_axes: Vec<Pauli>,
         pi_over_4_axes: Vec<Pauli>,
     }, // Measurement should be listed below, but it is not implemented yet.
+    SingleQubitArbitraryAngleRotation {
+        id: OperationId,
+        angle: f64,
+        target: Position,
+        routing_qubits: Vec<Position>,
+        // Currently only one distillation site is supported.
+        distillation_qubit: Position,
+    }
 }
 
 impl OperationWithAdditionalData {
@@ -95,6 +103,7 @@ impl OperationWithAdditionalData {
             PiOver4Rotation { id, .. } => *id,
             PiOver8Rotation { id, .. } => *id,
             SingleQubitPiOver8RotationBlock { id, .. } => *id,
+            SingleQubitArbitraryAngleRotation { id, .. } => *id,
         }
     }
 }
@@ -169,6 +178,23 @@ impl serde::Serialize for OperationWithAdditionalData {
                     ("correction_qubits", correction_qubits),
                     ("pi_over_8_axes", pi_over_8_axes),
                     ("pi_over_4_axes", pi_over_4_axes)
+                )
+            }
+            SingleQubitArbitraryAngleRotation {
+                id,
+                angle,
+                target,
+                routing_qubits,
+                distillation_qubit,
+            } => {
+                put!(
+                    "SINGLE_QUBIT_ARBITRARY_ANGLE_ROTATION",
+                    5,
+                    ("id", id.id),
+                    ("angle", angle),
+                    ("target", target),
+                    ("routing_qubits", routing_qubits),
+                    ("distillation_qubit", distillation_qubit)
                 )
             }
         }
@@ -289,6 +315,13 @@ pub struct Configuration {
     pub preferable_distillation_area_size: u32,
 
     pub enable_two_qubit_pi_over_4_rotation_with_y_initialization: bool,
+
+    pub use_star_resource_states: bool,
+    // The cycle needed to prepare a star resource state.
+    pub star_resource_state_distillation_cost: u32,
+    // The success probability of preparing a star resource state.
+    // FIXME: This probability should depend on the rotation angle.
+    pub star_resource_state_distillation_success_rate: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -1689,6 +1722,10 @@ mod tests {
             single_qubit_arbitrary_angle_rotation_precision: 1e-10,
             preferable_distillation_area_size: 5,
             enable_two_qubit_pi_over_4_rotation_with_y_initialization: false,
+
+            use_star_resource_states: false,
+            star_resource_state_distillation_cost: 0,
+            star_resource_state_distillation_success_rate: 0.0,
         }
     }
 
