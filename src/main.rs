@@ -53,14 +53,23 @@ struct Args {
     #[arg(short, long, default_value_t = false)]
     use_pi_over_8_rotation_block: bool,
 
+    #[arg(short, long, default_value_t = false)]
+    use_star_resource_states: bool,
+
     #[arg(short, long, default_value_t = 15_u32)]
     code_distance: u32,
 
     #[arg(short, long, default_value_t = 21_u32)]
     magic_state_distillation_cost: u32,
 
+    #[arg(short, long, default_value_t = 13_u32)]
+    star_resource_state_distillation_cost: u32,
+
     #[arg(short, long, default_value_t = 0.5)]
     magic_state_distillation_success_probability: f64,
+
+    #[arg(short, long, default_value_t = 0.8)]
+    star_resource_state_distillation_success_probability: f64,
 
     #[arg(short, long, default_value_t = 6)]
     num_distillations_for_pi_over_8_rotation: u32,
@@ -812,6 +821,7 @@ fn output_schedule(board: &board::Board, filename: &str) -> Result<(), std::io::
 fn run(
     board_without_blocks: board::Board,
     board_with_blocks: Option<board::Board>,
+    board_with_star: Option<board::Board>,
     num_executions: u32,
     parallelism: u32,
 ) {
@@ -821,16 +831,24 @@ fn run(
 
     let runner_for_board_without_blocks = runner::Runner::new(&board_without_blocks);
     let runner_for_board_with_blocks = board_with_blocks.map(|b| runner::Runner::new(&b));
-    let num_total_executions = if runner_for_board_with_blocks.is_some() {
-        num_executions * 2
-    } else {
-        num_executions
-    };
+    let runner_for_board_with_star = board_with_star.map(|b| runner::Runner::new(&b));
+    let num_total_executions = num_executions
+        + if runner_for_board_with_blocks.is_some() {
+            num_executions
+        } else {
+            0
+        }
+        + if runner_for_board_with_star.is_some() {
+            num_executions
+        } else {
+            0
+        };
 
     #[derive(Debug)]
     enum Id {
         WithoutBlocks,
         WithBlocks,
+        Star,
     }
     enum Command {
         Run(Box<runner::Runner>, Id),
@@ -845,18 +863,23 @@ fn run(
         .map(|_| {
             let receiver = Arc::clone(&receiver_for_command);
             let sender = Arc::clone(&sender_for_reply);
-            std::thread::spawn(move || {
-                loop {
-                    let command = receiver.lock().unwrap().recv().unwrap();
-                    match command {
-                        Command::Run(mut runner, id) => {
-                            let delay = runner.run();
-                            let runtime_cycle = runner.runtime_cycle();
-                            println!("Run ({:?}): runtime cycle = {}, delay = {}", id, runtime_cycle, delay);
-                            sender.lock().unwrap().send((id, runtime_cycle, delay)).unwrap();
-                        }
-                        Command::Stop => break,
+            std::thread::spawn(move || loop {
+                let command = receiver.lock().unwrap().recv().unwrap();
+                match command {
+                    Command::Run(mut runner, id) => {
+                        let delay = runner.run();
+                        let runtime_cycle = runner.runtime_cycle();
+                        println!(
+                            "Run ({:?}): runtime cycle = {}, delay = {}",
+                            id, runtime_cycle, delay
+                        );
+                        sender
+                            .lock()
+                            .unwrap()
+                            .send((id, runtime_cycle, delay))
+                            .unwrap();
                     }
+                    Command::Stop => break,
                 }
             })
         })
@@ -878,6 +901,15 @@ fn run(
         }
     }
 
+    if let Some(runner) = runner_for_board_with_star {
+        for _ in 0..num_executions {
+            let runner = Box::new(runner.clone());
+            sender_for_command
+                .send(Command::Run(runner, Id::Star))
+                .unwrap();
+        }
+    }
+
     for _ in 0..parallelism {
         sender_for_command.send(Command::Stop).unwrap();
     }
@@ -887,14 +919,21 @@ fn run(
 
     let mut results_without_blocks = Vec::new();
     let mut results_with_blocks = Vec::new();
+    let mut results_with_star = Vec::new();
 
-    for (id, cycle, delay) in receiver_for_reply.iter().take(num_total_executions as usize) {
+    for (id, cycle, delay) in receiver_for_reply
+        .iter()
+        .take(num_total_executions as usize)
+    {
         match id {
             Id::WithoutBlocks => {
                 results_without_blocks.push((cycle, delay));
             }
             Id::WithBlocks => {
                 results_with_blocks.push((cycle, delay));
+            }
+            Id::Star => {
+                results_with_star.push((cycle, delay));
             }
         }
     }
@@ -915,6 +954,15 @@ fn run(
             / results_with_blocks.len() as f64;
         println!("Average runtime cycles[with blocks] = {}", averaget_runtime_cycles);
         println!("Average delay[with blocks] = {}", average_delay);
+    }
+
+    if !results_with_star.is_empty() {
+        let averaget_runtime_cycles = results_with_star.iter().map(|(c, _)| c).sum::<u32>() as f64
+            / results_with_star.len() as f64;
+        let average_delay = results_with_star.iter().map(|(_, d)| d).sum::<u32>() as f64
+            / results_with_star.len() as f64;
+        println!("Average runtime cycles[with star] = {}", averaget_runtime_cycles);
+        println!("Average delay[with star] = {}", average_delay);
     }
 }
 
@@ -939,11 +987,20 @@ fn main() {
     println!("  schedule output filename = {:?}", args.schedule_output_filename);
     println!("  print_operations = {}", args.print_operations);
     println!("  use_pi_over_8_rotation_block = {}", args.use_pi_over_8_rotation_block);
+    println!("  use_star_resource_states = {}", args.use_star_resource_states);
     println!("  code_distance = {}", args.code_distance);
     println!("  magic_state_distillation_cost = {}", args.magic_state_distillation_cost);
     println!(
+        "  star_resource_state_distillation_cost = {}",
+        args.star_resource_state_distillation_cost
+    );
+    println!(
         "  magic_state_distillation_success_probability = {}",
         args.magic_state_distillation_success_probability
+    );
+    println!(
+        "  star_resource_state_distillation_success_probability = {}",
+        args.star_resource_state_distillation_success_probability
     );
     println!(
         "  num_distillations_for_pi_over_8_rotation = {}",
@@ -1084,8 +1141,9 @@ fn main() {
         let conf = conf.clone();
         let ops_with_arbitrary_angle_rotations = ops_with_arbitrary_angle_rotations.clone();
         let print_operations = args.print_operations;
+        let mapping = mapping.clone();
         let handle = std::thread::spawn(move || {
-            let mut board_with_blocks = board::Board::new(mapping.clone(), &conf);
+            let mut board_with_blocks = board::Board::new(mapping, &conf);
             board_with_blocks.set_arbitrary_angle_rotation_map(angle_map.clone());
             schedule(&mut board_with_blocks, &ops_with_arbitrary_angle_rotations, print_operations);
             sender.lock().unwrap().send(board_with_blocks).unwrap();
@@ -1114,6 +1172,44 @@ fn main() {
         None
     };
 
+    let receiver_and_join_handle = if args.use_star_resource_states {
+        let (sender, receiver) = mpsc::channel();
+        let sender = Arc::new(Mutex::new(sender));
+        let conf = Configuration {
+            use_star_resource_states: true,
+            star_resource_state_distillation_cost: args.star_resource_state_distillation_cost,
+            star_resource_state_distillation_success_rate: args
+                .star_resource_state_distillation_success_probability,
+            ..conf.clone()
+        };
+        let ops_with_arbitrary_angle_rotations = ops_with_arbitrary_angle_rotations.clone();
+        let print_operations = args.print_operations;
+        let handle = std::thread::spawn(move || {
+            let mut board_with_star = board::Board::new(mapping.clone(), &conf);
+            schedule(&mut board_with_star, &ops_with_arbitrary_angle_rotations, print_operations);
+            sender.lock().unwrap().send(board_with_star).unwrap();
+        });
+        Some((receiver, handle))
+    } else {
+        None
+    };
+
+    let board_with_star = if args.use_star_resource_states {
+        if let Some((receiver, handle)) = receiver_and_join_handle {
+            let board_with_star = receiver.recv().unwrap();
+            handle.join().unwrap();
+            println!(
+                "num cycles (with star resource states) = {}",
+                board_with_star.get_last_end_cycle()
+            );
+            Some(board_with_star)
+        } else {
+            unreachable!();
+        }
+    } else {
+        None
+    };
+
     println!("Scheduling is done.");
 
     if let Some(schedule_output_filename) = args.schedule_output_filename {
@@ -1130,6 +1226,7 @@ fn main() {
     run(
         board_without_blocks,
         board_with_blocks,
+        board_with_star,
         args.num_executions,
         args.parallelism,
     );

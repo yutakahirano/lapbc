@@ -88,12 +88,13 @@ pub enum OperationWithAdditionalData {
     }, // Measurement should be listed below, but it is not implemented yet.
     SingleQubitArbitraryAngleRotation {
         id: OperationId,
-        angle: f64,
         target: Position,
+        angle: f64,
+        axis: Pauli,
         routing_qubits: Vec<Position>,
         // Currently only one distillation site is supported.
         distillation_qubit: Position,
-    }
+    },
 }
 
 impl OperationWithAdditionalData {
@@ -184,6 +185,7 @@ impl serde::Serialize for OperationWithAdditionalData {
                 id,
                 angle,
                 target,
+                axis,
                 routing_qubits,
                 distillation_qubit,
             } => {
@@ -191,8 +193,9 @@ impl serde::Serialize for OperationWithAdditionalData {
                     "SINGLE_QUBIT_ARBITRARY_ANGLE_ROTATION",
                     5,
                     ("id", id.id),
-                    ("angle", angle),
                     ("target", target),
+                    ("angle", angle),
+                    ("axis", axis),
                     ("routing_qubits", routing_qubits),
                     ("distillation_qubit", distillation_qubit)
                 )
@@ -471,26 +474,30 @@ impl Board {
             Angle::PiOver4 => self.schedule_pi_over_4_rotation(rotation),
             Angle::PiOver8 => self.schedule_pi_over_8_rotation(rotation),
             Angle::Arbitrary(angle) => {
-                let eps = self.conf.single_qubit_arbitrary_angle_rotation_precision;
-                if let Some((_, pi_over_8_rotation_axes, pi_over_4_rotation_axes)) = self
-                    .arbitrary_angle_rotation_map
-                    .iter()
-                    .find(|(a, _, _)| (*a - angle).abs() < eps)
-                {
-                    let support_size = rotation.axis.iter().filter(|a| **a != Pauli::I).count();
-                    assert_eq!(support_size, 1);
-                    let target_position =
-                        rotation.axis.iter().position(|a| *a != Pauli::I).unwrap();
-                    let target = Qubit::new(target_position);
-                    let pi_over_8_rotation_axes = pi_over_8_rotation_axes.clone();
-                    let pi_over_4_rotation_axes = pi_over_4_rotation_axes.clone();
-                    self.schedule_single_qubit_pi_over_8_rotation_block(
-                        target,
-                        &pi_over_8_rotation_axes,
-                        &pi_over_4_rotation_axes,
-                    )
+                if self.conf.use_star_resource_states {
+                    self.schedule_star_rotation(rotation)
                 } else {
-                    panic!("self.arbitrary_angle_rotation_map.get(&{}) is None", angle);
+                    let eps = self.conf.single_qubit_arbitrary_angle_rotation_precision;
+                    if let Some((_, pi_over_8_rotation_axes, pi_over_4_rotation_axes)) = self
+                        .arbitrary_angle_rotation_map
+                        .iter()
+                        .find(|(a, _, _)| (*a - angle).abs() < eps)
+                    {
+                        let support_size = rotation.axis.iter().filter(|a| **a != Pauli::I).count();
+                        assert_eq!(support_size, 1);
+                        let target_position =
+                            rotation.axis.iter().position(|a| *a != Pauli::I).unwrap();
+                        let target = Qubit::new(target_position);
+                        let pi_over_8_rotation_axes = pi_over_8_rotation_axes.clone();
+                        let pi_over_4_rotation_axes = pi_over_4_rotation_axes.clone();
+                        self.schedule_single_qubit_pi_over_8_rotation_block(
+                            target,
+                            &pi_over_8_rotation_axes,
+                            &pi_over_4_rotation_axes,
+                        )
+                    } else {
+                        panic!("self.arbitrary_angle_rotation_map.get(&{}) is None", angle);
+                    }
                 }
             }
         }
@@ -894,6 +901,19 @@ impl Board {
         } else {
             unimplemented!("schedule_pi_over_8_rotation: support size > 1");
         }
+    }
+
+    fn schedule_star_rotation(&mut self, rotation: &PauliRotation) -> bool {
+        let support_size = rotation.axis.iter().filter(|a| **a != Pauli::I).count();
+        assert!(support_size == 1);
+        let target_position = rotation.axis.iter().position(|a| *a != Pauli::I).unwrap();
+        let target = Qubit::new(target_position);
+        let angle: f64 = match rotation.angle {
+            Angle::Arbitrary(a) => a,
+            _ => panic!("schedule_star_rotation: angle is not arbitrary"),
+        };
+
+        self.schedule_single_qubit_star_rotation(target, angle, rotation.axis[target_position])
     }
 
     fn get_num_preflight_distillations(&self, x: u32, y: u32, cycle: u32) -> u32 {
@@ -1473,6 +1493,168 @@ impl Board {
         true
     }
 
+    fn schedule_single_qubit_star_rotation(
+        &mut self,
+        qubit: Qubit,
+        angle: f64,
+        axis: Pauli,
+    ) -> bool {
+        let (x, y) = self.data_qubit_mapping[&qubit];
+        let width = self.conf.width;
+        let height = self.conf.height;
+        let distance = self.conf.code_distance;
+        let cycle = self.cycle;
+        let up_to = cycle + distance + y_measurement_cost(distance);
+        self.ensure_board_occupancy(up_to);
+        if self.has_schedule_at_or_after(qubit, cycle) {
+            return false;
+        }
+
+        let mut q = VecDeque::new();
+        match axis {
+            Pauli::I => return true,
+            Pauli::X => {
+                if x > 0 {
+                    q.push_back(((x - 1, y), vec![]));
+                }
+                if x + 1 < width {
+                    q.push_back(((x + 1, y), vec![]));
+                }
+            }
+            Pauli::Z => {
+                if y > 0 {
+                    q.push_back(((x, y - 1), vec![]));
+                }
+                if y + 1 < height {
+                    q.push_back(((x, y + 1), vec![]));
+                }
+            }
+            Pauli::Y => {
+                let mut routing_patterns = vec![];
+                // We use this to avoid integer underflow. In any case, a value with underflow will
+                // not be used because it will be filtered out by `cond1` and `cond2`.
+                let pre = |x: u32| x.wrapping_sub(1);
+                let available = |(x, y)| self.is_vacant(x, y, cycle..cycle + distance);
+                let mut run = |cond1, cond2, p1, p2, p3| {
+                    if cond1 && cond2 && available(p1) && available(p2) && available(p3) {
+                        routing_patterns.push((p1, p2, p3));
+                    }
+                };
+
+                run(x > 0, y > 0, (pre(x), y), (pre(x), pre(y)), (x, pre(y)));
+                run(x > 0, y + 1 < height, (pre(x), y), (pre(x), y + 1), (x, y + 1));
+                run(x + 1 < width, y > 0, (x + 1, y), (x + 1, pre(y)), (x, pre(y)));
+                run(x + 1 < width, y + 1 < height, (x + 1, y), (x + 1, y + 1), (x, y + 1));
+
+                for ((x1, y1), (x2, y2), (x3, y3)) in routing_patterns {
+                    let mut points = vec![];
+                    self.add_neighbors(x1, y1, &mut points);
+                    self.add_neighbors(x2, y2, &mut points);
+                    self.add_neighbors(x3, y3, &mut points);
+
+                    for p in points {
+                        if p != (x, y) && p != (x1, y1) && p != (x2, y2) && p != (x3, y3) {
+                            q.push_back((p, vec![(x1, y1), (x2, y2), (x3, y3)]));
+                        }
+                    }
+                }
+            }
+        }
+
+        while let Some((candidate, routing_qubits)) = q.pop_front() {
+            if self.place_gates_for_single_qubit_star_rotation(
+                x,
+                y,
+                angle,
+                &axis,
+                &candidate,
+                &routing_qubits,
+            ) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn place_gates_for_single_qubit_star_rotation(
+        &mut self,
+        x: u32,
+        y: u32,
+        angle: f64,
+        axis: &Pauli,
+        distillation_position: &(u32, u32),
+        routing_qubits: &[(u32, u32)],
+    ) -> bool {
+        let cycle = self.cycle;
+        let distance = self.conf.code_distance;
+        let distillation_cost = self.conf.star_resource_state_distillation_cost;
+
+        // FIXME: We should probably allocate more cycles, as gate teleportation fails with probability 0.5.
+        let distillation_cycle_range = cycle..cycle + distillation_cost + distance;
+        let lattice_surgery_cycle_range =
+            cycle + distillation_cost..cycle + distillation_cost + distance;
+        let id = self.issue_operation_id();
+
+        // The distillation qubit
+        if !self.is_vacant(
+            distillation_position.0,
+            distillation_position.1,
+            distillation_cycle_range.clone(),
+        ) {
+            return false;
+        }
+
+        // The target qubit
+        assert!(self.is_occupancy(
+            x,
+            y,
+            lattice_surgery_cycle_range.clone(),
+            BoardOccupancy::IdleDataQubit
+        ));
+
+        // The routing area
+        if !routing_qubits
+            .iter()
+            .all(|&(rx, ry)| self.is_vacant(rx, ry, lattice_surgery_cycle_range.clone()))
+        {
+            return false;
+        }
+
+        for c in distillation_cycle_range {
+            self.set_occupancy(
+                distillation_position.0,
+                distillation_position.1,
+                c,
+                BoardOccupancy::MagicStateDistillation(id),
+            );
+        }
+
+        for c in lattice_surgery_cycle_range {
+            self.set_occupancy(x, y, c, BoardOccupancy::DataQubitInOperation(id));
+            for &(rx, ry) in routing_qubits {
+                self.set_occupancy(rx, ry, c, BoardOccupancy::LatticeSurgery(id));
+            }
+        }
+
+        self.operations
+            .push(OperationWithAdditionalData::SingleQubitArbitraryAngleRotation {
+                id,
+                target: Position { x, y },
+                angle,
+                axis: *axis,
+                routing_qubits: routing_qubits
+                    .iter()
+                    .map(|&(x, y)| Position { x, y })
+                    .collect(),
+                distillation_qubit: Position {
+                    x: distillation_position.0,
+                    y: distillation_position.1,
+                },
+            });
+
+        true
+    }
+
     fn ensure_board_occupancy(&mut self, cycle: u32) {
         let size = (self.conf.width * self.conf.height) as usize;
         assert_eq!(self.occupancy.len() % size, 0);
@@ -1691,6 +1873,8 @@ impl IndexMut<(u32, u32)> for AncillaAvailability {
 
 #[cfg(test)]
 mod tests {
+    use clap::Id;
+
     use crate::{mapping::DataQubitMapping, pbc::Axis};
 
     use super::*;
@@ -2034,7 +2218,9 @@ mod tests {
         mapping.map(Qubit::new(1), 1, 1);
         mapping.map(Qubit::new(2), 2, 2);
         let mut board = new_board(mapping, 3);
-        board.conf.enable_two_qubit_pi_over_4_rotation_with_y_initialization = true;
+        board
+            .conf
+            .enable_two_qubit_pi_over_4_rotation_with_y_initialization = true;
         board.ensure_board_occupancy(5);
 
         let id = board.issue_operation_id();
@@ -2524,7 +2710,9 @@ mod tests {
         mapping.map(Qubit::new(0), 0, 0);
         mapping.map(Qubit::new(1), 1, 3);
         let mut board = new_board(mapping, 3);
-        board.conf.enable_two_qubit_pi_over_4_rotation_with_y_initialization = true;
+        board
+            .conf
+            .enable_two_qubit_pi_over_4_rotation_with_y_initialization = true;
         board.ensure_board_occupancy(11);
         board.set_occupancy(1, 1, 3, YMeasurement(dummy_id));
         board.set_occupancy(1, 2, 4, YMeasurement(dummy_id));
@@ -3223,6 +3411,122 @@ mod tests {
     }
 
     #[test]
+    fn test_schedule_single_qubit_star_rotation_z() {
+        use BoardOccupancy::*;
+        let width = 3_u32;
+        let height = 4_u32;
+        let angle = 0.012;
+        let axis = Pauli::Z;
+
+        let mut mapping = DataQubitMapping::new(width, height);
+        mapping.map(Qubit::new(0), 0, 1);
+        mapping.map(Qubit::new(1), 0, 2);
+        let conf = Configuration {
+            width,
+            height,
+            code_distance: 3,
+            use_star_resource_states: true,
+            star_resource_state_distillation_cost: 4,
+            ..default_conf()
+        };
+        let mut board = Board::new(mapping, &conf);
+        assert!(board.schedule_single_qubit_star_rotation(Qubit::new(0), angle, axis));
+
+        let id = OperationId { id: 0 };
+
+        assert!(board.is_occupancy(0, 0, 0..7, MagicStateDistillation(id)));
+        assert!(board.is_occupancy(0, 0, 7..15, Vacant));
+        assert!(board.is_occupancy(0, 1, 0..4, IdleDataQubit));
+        assert!(board.is_occupancy(0, 1, 4..7, DataQubitInOperation(id)));
+        assert!(board.is_occupancy(0, 1, 7..15, IdleDataQubit));
+        assert!(board.is_occupancy(0, 2, 0..15, IdleDataQubit));
+        assert!(board.is_occupancy(0, 3, 0..15, Vacant));
+        assert!(board.is_occupancy(1, 0, 0..15, Vacant));
+        assert!(board.is_occupancy(1, 1, 0..15, Vacant));
+        assert!(board.is_occupancy(1, 2, 0..15, Vacant));
+        assert!(board.is_occupancy(1, 3, 0..15, Vacant));
+        assert!(board.is_occupancy(2, 0, 0..15, Vacant));
+        assert!(board.is_occupancy(2, 1, 0..15, Vacant));
+        assert!(board.is_occupancy(2, 2, 0..15, Vacant));
+        assert!(board.is_occupancy(2, 3, 0..15, Vacant));
+
+        let operations = vec![
+            OperationWithAdditionalData::SingleQubitArbitraryAngleRotation {
+                id,
+                target: Position { x: 0, y: 1 },
+                angle,
+                axis,
+                routing_qubits: vec![],
+                distillation_qubit: Position { x: 0, y: 0 },
+            },
+        ];
+        assert_eq!(board.operations, operations);
+    }
+
+    #[test]
+    fn test_schedule_single_qubit_star_rotation_y() {
+        use BoardOccupancy::*;
+        let width = 3_u32;
+        let height = 4_u32;
+        let angle = 0.012;
+        let axis = Pauli::Y;
+
+        let mut mapping = DataQubitMapping::new(width, height);
+        mapping.map(Qubit::new(0), 0, 1);
+        mapping.map(Qubit::new(1), 0, 2);
+        let conf = Configuration {
+            width,
+            height,
+            code_distance: 3,
+            use_star_resource_states: true,
+            star_resource_state_distillation_cost: 4,
+            ..default_conf()
+        };
+        let mut board = Board::new(mapping, &conf);
+        assert!(board.schedule_single_qubit_star_rotation(Qubit::new(0), angle, axis));
+
+        let id = OperationId { id: 0 };
+
+        assert!(board.is_occupancy(0, 0, 0..4, Vacant));
+        assert!(board.is_occupancy(0, 0, 4..7, LatticeSurgery(id)));
+        assert!(board.is_occupancy(0, 0, 7..15, Vacant));
+        assert!(board.is_occupancy(0, 1, 0..4, IdleDataQubit));
+        assert!(board.is_occupancy(0, 1, 4..7, DataQubitInOperation(id)));
+        assert!(board.is_occupancy(0, 1, 7..15, IdleDataQubit));
+        assert!(board.is_occupancy(0, 2, 0..15, IdleDataQubit));
+        assert!(board.is_occupancy(0, 3, 0..15, Vacant));
+        assert!(board.is_occupancy(1, 0, 0..4, Vacant));
+        assert!(board.is_occupancy(1, 0, 4..7, LatticeSurgery(id)));
+        assert!(board.is_occupancy(1, 0, 7..15, Vacant));
+        assert!(board.is_occupancy(1, 1, 0..4, Vacant));
+        assert!(board.is_occupancy(1, 1, 4..7, LatticeSurgery(id)));
+        assert!(board.is_occupancy(1, 1, 7..15, Vacant));
+        assert!(board.is_occupancy(1, 2, 0..15, Vacant));
+        assert!(board.is_occupancy(1, 3, 0..15, Vacant));
+        assert!(board.is_occupancy(2, 0, 0..15, Vacant));
+        assert!(board.is_occupancy(2, 1, 0..7, MagicStateDistillation(id)));
+        assert!(board.is_occupancy(2, 1, 7..15, Vacant));
+        assert!(board.is_occupancy(2, 2, 0..15, Vacant));
+        assert!(board.is_occupancy(2, 3, 0..15, Vacant));
+
+        let operations = vec![
+            OperationWithAdditionalData::SingleQubitArbitraryAngleRotation {
+                id,
+                target: Position { x: 0, y: 1 },
+                angle,
+                axis,
+                routing_qubits: vec![
+                    Position { x: 1, y: 1 },
+                    Position { x: 1, y: 0 },
+                    Position { x: 0, y: 0 },
+                ],
+                distillation_qubit: Position { x: 2, y: 1 },
+            },
+        ];
+        assert_eq!(board.operations, operations);
+    }
+
+    #[test]
     fn test_pi_over_4_rotation_serialization() {
         let id = OperationId { id: 99 };
         let pos1 = Position { x: 0, y: 1 };
@@ -3309,6 +3613,44 @@ mod tests {
             "correction_qubits": [{"x":0,"y":0},{"x":1,"y":2},{"x":0,"y":1}],
             "pi_over_8_axes":["Y","Z","X","Z"],
             "pi_over_4_axes":["X","Y"]
+        }"#
+        .replace("\n", "")
+        .replace(" ", "");
+
+        assert_eq!(serialized, expectation);
+    }
+
+    #[test]
+    fn test_star_rotation_serialization() {
+        let id = OperationId { id: 91 };
+        let target = Position { x: 4, y: 2 };
+        let angle = 0.23;
+        let axis = Pauli::Y;
+        let routing_qubits = vec![
+            Position { x: 5, y: 2 },
+            Position { x: 4, y: 3 },
+            Position { x: 5, y: 4 },
+        ];
+        let distillation_qubit = Position { x: 6, y: 2 };
+        let op = OperationWithAdditionalData::SingleQubitArbitraryAngleRotation {
+            id,
+            target,
+            angle,
+            axis,
+            routing_qubits,
+            distillation_qubit,
+        };
+
+        let serialized = serde_json::to_string(&op).unwrap();
+        let expectation = r#"
+        {
+            "type":"SINGLE_QUBIT_ARBITRARY_ANGLE_ROTATION",
+            "id":91,
+            "target":{"x":4,"y":2},
+            "angle":0.23,
+            "axis":"Y",
+            "routing_qubits":[{"x":5,"y":2},{"x":4,"y":3},{"x":5,"y":4}],
+            "distillation_qubit":{"x":6,"y":2}
         }"#
         .replace("\n", "")
         .replace(" ", "");

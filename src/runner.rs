@@ -847,11 +847,11 @@ impl Runner {
                     has_resource_state,
                     ..
                 } => {
-                    assert!(is_ready(distillation_qubit));
-                    assert!(!*has_resource_state);
+                    if !is_ready(distillation_qubit) {
+                        continue;
+                    }
 
                     *steps += 1;
-
                     let add_delay = |pos: &Position| {
                         let cycle_on_schedule = self.runtime_cycle - self.delay_at[(pos.x, pos.y)];
                         let occupancy = &self.schedule[(pos.x, pos.y, cycle_on_schedule)];
@@ -4151,8 +4151,9 @@ mod tests {
         let operations = vec![
             OperationWithAdditionalData::SingleQubitArbitraryAngleRotation {
                 id,
-                angle: 0.4,
                 target: p(0, 0),
+                angle: 0.4,
+                axis: Pauli::Z,
                 routing_qubits: vec![p(0, 1)],
                 distillation_qubit: p(0, 2),
             },
@@ -4213,8 +4214,9 @@ mod tests {
         let operations = vec![
             OperationWithAdditionalData::SingleQubitArbitraryAngleRotation {
                 id,
-                angle: 0.4,
                 target: p(0, 0),
+                angle: 0.4,
+                axis: Pauli::Z,
                 routing_qubits: vec![p(0, 1)],
                 distillation_qubit: p(0, 2),
             },
@@ -4275,8 +4277,9 @@ mod tests {
         let operations = vec![
             OperationWithAdditionalData::SingleQubitArbitraryAngleRotation {
                 id,
-                angle: 0.4,
                 target: p(0, 0),
+                angle: 0.4,
+                axis: Pauli::Z,
                 routing_qubits: vec![p(0, 1)],
                 distillation_qubit: p(0, 2),
             },
@@ -4337,8 +4340,9 @@ mod tests {
         let operations = vec![
             OperationWithAdditionalData::SingleQubitArbitraryAngleRotation {
                 id,
-                angle: 0.4,
                 target: p(0, 0),
+                angle: 0.4,
+                axis: Pauli::Z,
                 routing_qubits: vec![p(0, 1)],
                 distillation_qubit: p(0, 2),
             },
